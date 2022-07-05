@@ -154,7 +154,7 @@ fn get_tilings(shape: &BTreeSet<(i32, i32)>) -> Vec<(BTreeMap<(i32, i32), (i32, 
     tilings.into_iter().map(|(tiling, (b1, b2))| (tiling, b1, b2)).collect()
 }
 
-fn max<'ctx>(context: &'ctx Context, a: &Int<'ctx>, b: &Int<'ctx>) -> Int<'ctx> {
+fn max<'ctx>(a: &Int<'ctx>, b: &Int<'ctx>) -> Int<'ctx> {
     a.ge(b).ite(a, b)
 }
 
@@ -206,7 +206,7 @@ impl Param {
         (res, if self.dom != 0 { Some(Int::from_u64(context, self.dom as u64)) } else { None })
     }
     fn disty_set<'ctx, P: Point>(&self, context: &'ctx Context, p: (P, &Bool<'ctx>), q: (P, &Bool<'ctx>), adj: &Adj<P>, distances: &Distances<P>) -> (BTreeSet<P>, Option<BTreeSet<P>>, Option<Int<'ctx>>) {
-        let dom = if distances.get(p.0, q.0) < self.disty_dist_limit { Some(Int::from_u64(context, self.dom as u64)) } else { None };
+        let dom = if self.disty != 0 && distances.get(p.0, q.0) < self.disty_dist_limit { Some(Int::from_u64(context, self.disty as u64)) } else { None };
         let dom_sets = (self.dom_set(context, p, adj).0, self.dom_set(context, q, adj).0);
         match self.sharp_disty {
             false => (dom_sets.0.symmetric_difference(&dom_sets.1).copied().collect(), None, dom),
@@ -272,7 +272,7 @@ fn test_graph(graph: &Graph, param: &Param, exhaustive: bool, log: bool) -> Vec<
         if let Some(disty) = disty {
             let mut value = count_det(&context, &verts, &group);
             if let Some(alt) = alt {
-                value = max(&context, &value, &count_det(&context, &verts, &alt));
+                value = max(&value, &count_det(&context, &verts, &alt));
             }
             s.assert(&value.ge(&disty));
         }
@@ -375,7 +375,7 @@ fn test_shape(shape: &BTreeSet<(i32, i32)>, grid: &Grid, param: &Param, log: boo
         if let Some(disty) = disty {
             let mut value = count_det_tiling(&context, &verts, &group, &identity_map);
             if let Some(alt) = alt {
-                value = max(&context, &value, &count_det_tiling(&context, &verts, &alt, &identity_map));
+                value = max(&value, &count_det_tiling(&context, &verts, &alt, &identity_map));
             }
             s.assert(&value.ge(&disty));
         }
@@ -399,7 +399,7 @@ fn test_shape(shape: &BTreeSet<(i32, i32)>, grid: &Grid, param: &Param, log: boo
                 if let Some(disty) = disty {
                     let mut value = count_det_tiling(&context, &verts, &group, &identity_map);
                     if let Some(alt) = alt {
-                        value = max(&context, &value, &count_det_tiling(&context, &verts, &alt, &identity_map));
+                        value = max(&value, &count_det_tiling(&context, &verts, &alt, &identity_map));
                     }
                     s.assert(&value.ge(&disty));
                 }
