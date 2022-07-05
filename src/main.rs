@@ -291,10 +291,17 @@ fn test_graph(graph: &Graph, param: &Param, exhaustive: bool, log: bool) -> Vec<
         }
     }
 
-    fn vert_names<I: Iterator<Item = usize>>(graph: &Graph, verts: I) -> Vec<&str> {
+    fn vert_names<I: Iterator<Item = usize>>(graph: &Graph, verts: I) -> String {
         let mut names: Vec<_> = verts.map(|v| graph.verts[v].0.as_str()).collect();
         human_sort::sort(&mut names);
-        names
+        let mut res = String::new();
+        res.push('{');
+        for name in names {
+            res.push(' ');
+            res.push_str(name);
+        }
+        res.push_str(" }");
+        res
     }
 
     let mut solutions: Vec<BTreeSet<usize>> = vec![];
@@ -315,7 +322,7 @@ fn test_graph(graph: &Graph, param: &Param, exhaustive: bool, log: bool) -> Vec<
                 s.assert(&different_answer);
 
                 if log {
-                    println!("solution {}: {:?}", solutions.len() + 1, vert_names(graph, detectors.iter().copied()));
+                    println!("solution {}: {}", solutions.len() + 1, vert_names(graph, detectors.iter().copied()));
                 }
 
                 solutions.push(detectors);
@@ -342,9 +349,9 @@ fn test_graph(graph: &Graph, param: &Param, exhaustive: bool, log: bool) -> Vec<
                 }
                 let sometimes_detectors: Vec<bool> = iter::zip(&always_detectors, &never_detectors).map(|(a, b)| !a && !b).collect();
 
-                println!("always    detectors: {:?}", vert_names(graph, always_detectors.iter().enumerate().filter(|x| *x.1).map(|x| x.0)));
-                println!("never     detectors: {:?}", vert_names(graph, never_detectors.iter().enumerate().filter(|x| *x.1).map(|x| x.0)));
-                println!("sometimes detectors: {:?}", vert_names(graph, sometimes_detectors.iter().enumerate().filter(|x| *x.1).map(|x| x.0)));
+                println!("always    detectors: {}", vert_names(graph, always_detectors.iter().enumerate().filter(|x| *x.1).map(|x| x.0)));
+                println!("never     detectors: {}", vert_names(graph, never_detectors.iter().enumerate().filter(|x| *x.1).map(|x| x.0)));
+                println!("sometimes detectors: {}", vert_names(graph, sometimes_detectors.iter().enumerate().filter(|x| *x.1).map(|x| x.0)));
             }
             None => println!("no solution"),
         }
