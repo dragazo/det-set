@@ -14,6 +14,7 @@ use z3::ast::{Bool, Int, Ast};
 
 trait Point: Copy + Ord {}
 type Adj<'a, P> = dyn 'a + Fn(P) -> BTreeSet<P>;
+type Counter<'ctx, P> = dyn 'ctx + Fn(&'ctx Context, &BTreeSet<P>) -> Int<'ctx>;
 
 impl Point for (i32, i32) {}
 impl Point for usize {}
@@ -181,10 +182,10 @@ impl FromStr for Grid {
     type Err = String;
     fn from_str(s: &str) -> Result<Self, String> {
         Ok(match s.trim().to_lowercase().as_str() {
-            "k" | "king" => Grid { name: "K", adj: &adj_k },
-            "sq" | "square" => Grid { name: "SQ", adj: &adj_sq },
-            "tri" => Grid { name: "TRI", adj: &adj_tri },
-            "hex" => Grid { name: "HEX", adj: &adj_hex },
+            "k" | "king"    => Grid { name: "K",   adj: &adj_k   },
+            "sq" | "square" => Grid { name: "SQ",  adj: &adj_sq  },
+            "tri"           => Grid { name: "TRI", adj: &adj_tri },
+            "hex"           => Grid { name: "HEX", adj: &adj_hex },
             _ => return Err(format!("unknown grid type: '{}'", s)),
         })
     }
@@ -199,33 +200,37 @@ struct Param {
     disty_dist_limit: usize,
 }
 impl Param {
-    fn dom_set<'ctx, P: Point>(&self, context: &'ctx Context, p: (P, &Bool<'ctx>), adj: &Adj<P>) -> (BTreeSet<P>, Option<Int<'ctx>>) {
-        let mut res = adj(p.0);
-        if !self.open_dom { assert!(res.insert(p.0)); }
-        else { assert!(!res.contains(&p.0)); }
-        (res, if self.dom != 0 { Some(Int::from_u64(context, self.dom as u64)) } else { None })
+    fn dom_region<P: Point>(&self, p: P, adj: &Adj<P>) -> BTreeSet<P> {
+        let mut res = adj(p);
+        if !self.open_dom { assert!(res.insert(p)); }
+        else { assert!(!res.contains(&p)); }
+        res
     }
-    fn disty_set<'ctx, P: Point>(&self, context: &'ctx Context, p: (P, &Bool<'ctx>), q: (P, &Bool<'ctx>), adj: &Adj<P>, distances: &Distances<P>) -> (BTreeSet<P>, Option<BTreeSet<P>>, Option<Int<'ctx>>) {
-        let dom = if self.disty != 0 && distances.get(p.0, q.0) < self.disty_dist_limit { Some(Int::from_u64(context, self.disty as u64)) } else { None };
-        let dom_sets = (self.dom_set(context, p, adj).0, self.dom_set(context, q, adj).0);
-        match self.sharp_disty {
-            false => (dom_sets.0.symmetric_difference(&dom_sets.1).copied().collect(), None, dom),
-            true => (&dom_sets.0 - &dom_sets.1, Some(&dom_sets.1 - &dom_sets.0), dom),
-        }
+    fn check_dom<'ctx, P: Point>(&self, context: &'ctx Context, p: (P, &Bool<'ctx>), adj: &Adj<P>, counter: &Counter<'ctx, P>) -> Option<Bool<'ctx>> {
+        if self.dom == 0 { return None }
+        Some(counter(context, &self.dom_region(p.0, adj)).ge(&Int::from_u64(context, self.dom as u64)))
+    }
+    fn check_disty<'ctx, P: Point>(&self, context: &'ctx Context, p: (P, &Bool<'ctx>), q: (P, &Bool<'ctx>), adj: &Adj<P>, distances: &Distances<P>, counter: &Counter<'ctx, P>) -> Option<Bool<'ctx>> {
+        if self.disty == 0 || distances.get(p.0, q.0) >= self.disty_dist_limit { return None }
+        let regions = (self.dom_region(p.0, adj), self.dom_region(q.0, adj));
+        Some(match self.sharp_disty {
+            false => counter(context, &regions.0.symmetric_difference(&regions.1).copied().collect()).ge(&Int::from_u64(context, self.disty as u64)),
+            true => max(&counter(context, &(&regions.0 - &regions.1)), &counter(context, &(&regions.1 - &regions.0))).ge(&Int::from_u64(context, self.disty as u64)),
+        })
     }
 }
 impl FromStr for Param {
     type Err = String;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         Ok(match s.trim().to_lowercase().as_str() {
-            "old" => Param { name: "OLD", open_dom: true, dom: 1, disty: 1, sharp_disty: false, disty_dist_limit: 3 },
-            "red:old" | "red-old" | "redold" => Param { name: "RED:OLD", open_dom: true, dom: 2, disty: 2, sharp_disty: false, disty_dist_limit: 3 },
-            "det:old" | "det-old" | "detold" => Param { name: "DET:OLD", open_dom: true, dom: 2, disty: 2, sharp_disty: true, disty_dist_limit: 3 },
-            "err:old" | "err-old" | "errold" => Param { name: "ERR:OLD", open_dom: true, dom: 3, disty: 3, sharp_disty: false, disty_dist_limit: 3 },
-            "ic" => Param { name: "IC", open_dom: false, dom: 1, disty: 1, sharp_disty: false, disty_dist_limit: 3 },
-            "red:ic" | "red-ic" | "redic" => Param { name: "RED:IC", open_dom: false, dom: 2, disty: 2, sharp_disty: false, disty_dist_limit: 3 },
-            "det:ic" | "det-ic" | "detic" => Param { name: "DET:IC", open_dom: false, dom: 2, disty: 2, sharp_disty: false, disty_dist_limit: 3 },
-            "err:ic" | "err-ic" | "erric" => Param { name: "ERR:IC", open_dom: false, dom: 3, disty: 3, sharp_disty: false, disty_dist_limit: 3 },
+            "old"                            => Param { name: "OLD",     open_dom: true,  dom: 1, disty: 1, sharp_disty: false, disty_dist_limit: 3 },
+            "red:old" | "red-old" | "redold" => Param { name: "RED:OLD", open_dom: true,  dom: 2, disty: 2, sharp_disty: false, disty_dist_limit: 3 },
+            "det:old" | "det-old" | "detold" => Param { name: "DET:OLD", open_dom: true,  dom: 2, disty: 2, sharp_disty: true,  disty_dist_limit: 3 },
+            "err:old" | "err-old" | "errold" => Param { name: "ERR:OLD", open_dom: true,  dom: 3, disty: 3, sharp_disty: false, disty_dist_limit: 3 },
+            "ic"                             => Param { name: "IC",      open_dom: false, dom: 1, disty: 1, sharp_disty: false, disty_dist_limit: 3 },
+            "red:ic" | "red-ic" | "redic"    => Param { name: "RED:IC",  open_dom: false, dom: 2, disty: 2, sharp_disty: false, disty_dist_limit: 3 },
+            "det:ic" | "det-ic" | "detic"    => Param { name: "DET:IC",  open_dom: false, dom: 2, disty: 2, sharp_disty: true,  disty_dist_limit: 3 },
+            "err:ic" | "err-ic" | "erric"    => Param { name: "ERR:IC",  open_dom: false, dom: 3, disty: 3, sharp_disty: false, disty_dist_limit: 3 },
             _ => return Err(format!("unknown param type: '{}'", s)),
         })
     }
@@ -248,6 +253,20 @@ enum Mode {
     },
 }
 
+fn gcd(mut a: usize, mut b: usize) -> usize {
+    while b != 0 {
+        (a, b) = (b, a % b);
+    }
+    a
+}
+#[test]
+fn test_gcd() {
+    assert_eq!(gcd(6, 16), 2); assert_eq!(gcd(16, 6), 2);
+    assert_eq!(gcd(8, 16), 8); assert_eq!(gcd(16, 8), 8);
+    assert_eq!(gcd(64, 16), 16); assert_eq!(gcd(16, 64), 16);
+    assert_eq!(gcd(1071, 462), 21); assert_eq!(gcd(462, 1071), 21);
+}
+
 fn test_graph(graph: &Graph, param: &Param, exhaustive: bool, log: bool) -> Vec<BTreeSet<usize>> {
     let n = graph.verts.len();
     let adj = |p: usize| graph.verts[p].1.iter().copied().collect();
@@ -261,20 +280,14 @@ fn test_graph(graph: &Graph, param: &Param, exhaustive: bool, log: bool) -> Vec<
     s.minimize(&detector_count);
 
     for p in 0..n {
-        let (group, dom) = param.dom_set(&context, (p, &verts[p]), &adj);
-        if let Some(dom) = dom {
-            s.assert(&count_det(&context, &verts, &group).ge(&dom));
+        if let Some(req) = param.check_dom(&context, (p, &verts[p]), &adj, &|context, group| count_det(context, &verts, group)) {
+            s.assert(&req);
         }
     }
     for pq in (0..n).combinations(2) {
         let (p, q) = (pq[0], pq[1]);
-        let (group, alt, disty) = param.disty_set(&context, (p, &verts[p]), (q, &verts[q]), &adj, &distances);
-        if let Some(disty) = disty {
-            let mut value = count_det(&context, &verts, &group);
-            if let Some(alt) = alt {
-                value = max(&value, &count_det(&context, &verts, &alt));
-            }
-            s.assert(&value.ge(&disty));
+        if let Some(req) = param.check_disty(&context, (p, &verts[p]), (q, &verts[q]), &adj, &distances, &|context, group| count_det(context, &verts, group)) {
+            s.assert(&req);
         }
     }
 
@@ -347,7 +360,6 @@ fn test_shape(shape: &BTreeSet<(i32, i32)>, grid: &Grid, param: &Param, log: boo
 
     let inflated = inflate(&shape, grid.adj, 2);
     let interior = get_interior(&shape, grid.adj);
-    let identity_map = shape.iter().copied().map(|p| (p, p)).collect();
     let distances = Distances::within_shape(&inflated, grid.adj);
     let tilings = get_tilings(&shape);
 
@@ -363,45 +375,35 @@ fn test_shape(shape: &BTreeSet<(i32, i32)>, grid: &Grid, param: &Param, log: boo
     let detector_count = count(&context, verts.values());
     s.minimize(&detector_count);
 
+    let identity_map = shape.iter().copied().map(|p| (p, p)).collect();
     for p in interior.iter().copied() {
-        let (group, dom) = param.dom_set(&context, (p, &verts[&p]), &grid.adj);
-        if let Some(dom) = dom {
-            s.assert(&count_det_tiling(&context, &verts, &group, &identity_map).ge(&dom));
+        if let Some(req) = param.check_dom(&context, (p, &verts[&p]), &grid.adj, &|context, group| count_det_tiling(context, &verts, group, &identity_map)) {
+            s.assert(&req);
         }
     }
     for pq in interior.iter().copied().combinations(2) {
         let (p, q) = (pq[0], pq[1]);
-        let (group, alt, disty) = param.disty_set(&context, (p, &verts[&p]), (q, &verts[&q]), &grid.adj, &distances);
-        if let Some(disty) = disty {
-            let mut value = count_det_tiling(&context, &verts, &group, &identity_map);
-            if let Some(alt) = alt {
-                value = max(&value, &count_det_tiling(&context, &verts, &alt, &identity_map));
-            }
-            s.assert(&value.ge(&disty));
+        if let Some(req) = param.check_disty(&context, (p, &verts[&p]), (q, &verts[&q]), &grid.adj, &distances, &|context, group| count_det_tiling(context, &verts, group, &identity_map)) {
+            s.assert(&req);
         }
     }
+    drop(identity_map);
 
     let mut any_solution = Bool::from_bool(&context, false);
     for (i, (tiling, _, _)) in tilings.iter().enumerate() {
         let mut solution = Bool::from_bool(&context, true);
         for p in inflated.iter().copied() {
             if !interior.contains(&p) {
-                let (group, dom) = param.dom_set(&context, (p, &verts[&tiling[&p]]), &grid.adj);
-                if let Some(dom) = dom {
-                    solution &= count_det_tiling(&context, &verts, &group, &identity_map).ge(&dom);
+                if let Some(req) = param.check_dom(&context, (p, &verts[&tiling[&p]]), &grid.adj, &|context, group| count_det_tiling(context, &verts, group, tiling)) {
+                    solution &= &req;
                 }
             }
         }
         for pq in inflated.iter().copied().combinations(2) {
             let (p, q) = (pq[0], pq[1]);
             if !interior.contains(&p) || !interior.contains(&q) {
-                let (group, alt, disty) = param.disty_set(&context, (p, &verts[&tiling[&p]]), (q, &verts[&tiling[&q]]), &grid.adj, &distances);
-                if let Some(disty) = disty {
-                    let mut value = count_det_tiling(&context, &verts, &group, &identity_map);
-                    if let Some(alt) = alt {
-                        value = max(&value, &count_det_tiling(&context, &verts, &alt, &identity_map));
-                    }
-                    s.assert(&value.ge(&disty));
+                if let Some(req) = param.check_disty(&context, (p, &verts[&tiling[&p]]), (q, &verts[&tiling[&q]]), &grid.adj, &distances, &|context, group| count_det_tiling(context, &verts, group, tiling)) {
+                    solution &= &req;
                 }
             }
         }
@@ -431,7 +433,9 @@ fn print_result(shape: &BTreeSet<(i32, i32)>, res: &Option<(BTreeSet<(i32, i32)>
         Some((detectors, b1, b2, tidx)) => {
             println!("found minimum:");
             print_shape(&shape, detectors);
-            println!("\n{}/{} = {}", detectors.len(), shape.len(), detectors.len() as f64 / shape.len() as f64);
+            let m = gcd(detectors.len(), shape.len());
+            let (n, d) = (detectors.len() / m, shape.len() / m);
+            println!("\n{}/{} = {}", n, d, n as f64 / d as f64);
             println!("basis: {:?} {:?} (tiling index {})", b1, b2, tidx);
         }
         None => println!("no solution"),
