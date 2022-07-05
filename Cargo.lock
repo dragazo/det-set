@@ -151,6 +151,7 @@ name = "det-set"
 version = "0.1.0"
 dependencies = [
  "clap 3.2.4",
+ "human-sort",
  "itertools",
  "z3",
 ]
@@ -200,6 +201,12 @@ checksum = "62b467343b94ba476dcb2500d242dadbb39557df889310ac77c5d99100aaac33"
 dependencies = [
  "libc",
 ]
+
+[[package]]
+name = "human-sort"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "140a09c9305e6d5e557e2ed7cbc68e05765a7d4213975b87cb04920689cc6219"
 
 [[package]]
 name = "humantime"

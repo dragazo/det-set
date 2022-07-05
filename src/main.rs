@@ -2,7 +2,9 @@ use std::collections::{BTreeSet, BTreeMap};
 use std::str::FromStr;
 use std::num::NonZeroUsize;
 use std::io::{self, BufRead, BufReader};
+use std::cmp::Ordering;
 use std::fs::File;
+use std::{iter, fmt};
 
 use itertools::Itertools;
 use clap::Parser;
@@ -83,17 +85,6 @@ fn print_shape(shape: &BTreeSet<(i32, i32)>, detectors: &BTreeSet<(i32, i32)>) {
     println!();
 }
 
-fn dom_set<P: Point>(p: P, adj: &Adj<P>, open_dom: bool) -> BTreeSet<P> {
-    let mut res = adj(p);
-    if !open_dom { assert!(res.insert(p)); }
-    else { assert!(!res.contains(&p)); }
-    res
-}
-fn disty_set<P: Point>(p: P, q: P, adj: &Adj<P>, open_dom: bool) -> BTreeSet<P> {
-    let dom_sets = (dom_set(p, adj, open_dom), dom_set(q, adj, open_dom));
-    dom_sets.0.symmetric_difference(&dom_sets.1).copied().collect()
-}
-
 fn inflate<P: Point>(shape: &BTreeSet<P>, adj: &Adj<P>, radius: usize) -> BTreeSet<P> {
     let mut res = shape.clone();
     for _ in 0..radius {
@@ -163,6 +154,10 @@ fn get_tilings(shape: &BTreeSet<(i32, i32)>) -> Vec<(BTreeMap<(i32, i32), (i32, 
     tilings.into_iter().map(|(tiling, (b1, b2))| (tiling, b1, b2)).collect()
 }
 
+fn max<'ctx>(context: &'ctx Context, a: &Int<'ctx>, b: &Int<'ctx>) -> Int<'ctx> {
+    a.ge(b).ite(a, b)
+}
+
 fn count<'ctx, 'a, I>(context: &'ctx Context, iter: I) -> Int<'ctx> where 'ctx: 'a, I: Iterator<Item = &'a Bool<'ctx>> {
     let (zero, one) = (Int::from_u64(context, 0), Int::from_u64(context, 1));
     let mut res = zero.clone();
@@ -200,18 +195,37 @@ struct Param {
     open_dom: bool,
     dom: usize,
     disty: usize,
+    sharp_disty: bool,
     disty_dist_limit: usize,
+}
+impl Param {
+    fn dom_set<'ctx, P: Point>(&self, context: &'ctx Context, p: (P, &Bool<'ctx>), adj: &Adj<P>) -> (BTreeSet<P>, Option<Int<'ctx>>) {
+        let mut res = adj(p.0);
+        if !self.open_dom { assert!(res.insert(p.0)); }
+        else { assert!(!res.contains(&p.0)); }
+        (res, if self.dom != 0 { Some(Int::from_u64(context, self.dom as u64)) } else { None })
+    }
+    fn disty_set<'ctx, P: Point>(&self, context: &'ctx Context, p: (P, &Bool<'ctx>), q: (P, &Bool<'ctx>), adj: &Adj<P>, distances: &Distances<P>) -> (BTreeSet<P>, Option<BTreeSet<P>>, Option<Int<'ctx>>) {
+        let dom = if distances.get(p.0, q.0) < self.disty_dist_limit { Some(Int::from_u64(context, self.dom as u64)) } else { None };
+        let dom_sets = (self.dom_set(context, p, adj).0, self.dom_set(context, q, adj).0);
+        match self.sharp_disty {
+            false => (dom_sets.0.symmetric_difference(&dom_sets.1).copied().collect(), None, dom),
+            true => (&dom_sets.0 - &dom_sets.1, Some(&dom_sets.1 - &dom_sets.0), dom),
+        }
+    }
 }
 impl FromStr for Param {
     type Err = String;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         Ok(match s.trim().to_lowercase().as_str() {
-            "old" => Param { name: "OLD", open_dom: true, dom: 1, disty: 1, disty_dist_limit: 3 },
-            "red:old" | "red-old" | "redold" => Param { name: "RED:OLD", open_dom: true, dom: 2, disty: 2, disty_dist_limit: 3 },
-            "err:old" | "err-old" | "errold" => Param { name: "ERR:OLD", open_dom: true, dom: 3, disty: 3, disty_dist_limit: 3 },
-            "ic" => Param { name: "IC", open_dom: false, dom: 1, disty: 1, disty_dist_limit: 3 },
-            "red:ic" | "red-ic" | "redic" => Param { name: "RED:IC", open_dom: false, dom: 2, disty: 2, disty_dist_limit: 3 },
-            "err:ic" | "err-ic" | "erric" => Param { name: "ERR:IC", open_dom: false, dom: 3, disty: 3, disty_dist_limit: 3 },
+            "old" => Param { name: "OLD", open_dom: true, dom: 1, disty: 1, sharp_disty: false, disty_dist_limit: 3 },
+            "red:old" | "red-old" | "redold" => Param { name: "RED:OLD", open_dom: true, dom: 2, disty: 2, sharp_disty: false, disty_dist_limit: 3 },
+            "det:old" | "det-old" | "detold" => Param { name: "DET:OLD", open_dom: true, dom: 2, disty: 2, sharp_disty: true, disty_dist_limit: 3 },
+            "err:old" | "err-old" | "errold" => Param { name: "ERR:OLD", open_dom: true, dom: 3, disty: 3, sharp_disty: false, disty_dist_limit: 3 },
+            "ic" => Param { name: "IC", open_dom: false, dom: 1, disty: 1, sharp_disty: false, disty_dist_limit: 3 },
+            "red:ic" | "red-ic" | "redic" => Param { name: "RED:IC", open_dom: false, dom: 2, disty: 2, sharp_disty: false, disty_dist_limit: 3 },
+            "det:ic" | "det-ic" | "detic" => Param { name: "DET:IC", open_dom: false, dom: 2, disty: 2, sharp_disty: false, disty_dist_limit: 3 },
+            "err:ic" | "err-ic" | "erric" => Param { name: "ERR:IC", open_dom: false, dom: 3, disty: 3, sharp_disty: false, disty_dist_limit: 3 },
             _ => return Err(format!("unknown param type: '{}'", s)),
         })
     }
@@ -231,43 +245,53 @@ enum Mode {
 
         #[clap(short, long)]
         all: bool,
-        #[clap(short, long, default_value_t = 1)]
-        max_solutions: usize,
     },
 }
 
-fn test_graph(graph: &Graph, param: &Param, max_solutions: usize, log: bool) -> Vec<Vec<usize>> {
+fn test_graph(graph: &Graph, param: &Param, exhaustive: bool, log: bool) -> Vec<BTreeSet<usize>> {
     let n = graph.verts.len();
     let adj = |p: usize| graph.verts[p].1.iter().copied().collect();
     let distances = Distances::within_shape(&(0..n).collect(), &adj);
 
     let context = Context::new(&Default::default());
     let verts: Vec<Bool> = (0..n).map(|p| Bool::new_const(&context, format!("v{p}"))).collect();
-    let dom_int = Int::from_u64(&context, param.dom as u64);
-    let disty_int = Int::from_u64(&context, param.disty as u64);
 
     let s = Optimize::new(&context);
     let detector_count = count(&context, verts.iter());
     s.minimize(&detector_count);
 
     for p in 0..n {
-        s.assert(&count_det(&context, &verts, &dom_set(p, &adj, param.open_dom)).ge(&dom_int));
+        let (group, dom) = param.dom_set(&context, (p, &verts[p]), &adj);
+        if let Some(dom) = dom {
+            s.assert(&count_det(&context, &verts, &group).ge(&dom));
+        }
     }
     for pq in (0..n).combinations(2) {
         let (p, q) = (pq[0], pq[1]);
-        if distances.get(p, q) < param.disty_dist_limit {
-            s.assert(&count_det(&context, &verts, &disty_set(p, q, &adj, param.open_dom)).ge(&disty_int));
+        let (group, alt, disty) = param.disty_set(&context, (p, &verts[p]), (q, &verts[q]), &adj, &distances);
+        if let Some(disty) = disty {
+            let mut value = count_det(&context, &verts, &group);
+            if let Some(alt) = alt {
+                value = max(&context, &value, &count_det(&context, &verts, &alt));
+            }
+            s.assert(&value.ge(&disty));
         }
     }
 
-    let mut solutions = vec![];
-    while solutions.len() < max_solutions {
+    fn vert_names<I: Iterator<Item = usize>>(graph: &Graph, verts: I) -> Vec<&str> {
+        let mut names: Vec<_> = verts.map(|v| graph.verts[v].0.as_str()).collect();
+        human_sort::sort(&mut names);
+        names
+    }
+
+    let mut solutions: Vec<BTreeSet<usize>> = vec![];
+    loop {
         match s.check(&[]) {
             SatResult::Sat => {
                 let model = s.get_model().unwrap();
                 let detectors: BTreeSet<usize> = verts.iter().enumerate().filter(|(_, v)| model.eval(*v, false).unwrap().as_bool().unwrap()).map(|(p, _)| p).collect();
 
-                let prev_size = solutions.first().map(|s: &Vec<usize>| s.len()).unwrap_or(detectors.len());
+                let prev_size = solutions.first().map(|s| s.len()).unwrap_or(detectors.len());
                 assert!(prev_size <= detectors.len());
                 if prev_size < detectors.len() { break }
 
@@ -278,17 +302,41 @@ fn test_graph(graph: &Graph, param: &Param, max_solutions: usize, log: bool) -> 
                 s.assert(&different_answer);
 
                 if log {
-                    let mut det_names: Vec<_> = detectors.iter().map(|&p| &graph.verts[p].0).collect();
-                    det_names.sort();
-                    println!("found solution ({}): {det_names:?}", detectors.len());
+                    println!("solution {}: {:?}", solutions.len() + 1, vert_names(graph, detectors.iter().copied()));
                 }
 
-                solutions.push(detectors.into_iter().collect());
+                solutions.push(detectors);
+                if !exhaustive { break }
             }
             SatResult::Unsat => break,
             SatResult::Unknown => unreachable!(),
         }
     }
+
+    if log {
+        match solutions.first() {
+            Some(solution) => if exhaustive {
+                println!("\nexhausted all {} (minimum) solutions of size {}\n", solutions.len(), solution.len());
+
+                let mut always_detectors = vec![true; n];
+                let mut never_detectors = vec![true; n];
+                for solution in solutions.iter() {
+                    for i in 0..n {
+                        let is_detector = solution.contains(&i);
+                        if is_detector { never_detectors[i] = false; }
+                        else { always_detectors[i] = false; }
+                    }
+                }
+                let sometimes_detectors: Vec<bool> = iter::zip(&always_detectors, &never_detectors).map(|(a, b)| !a && !b).collect();
+
+                println!("always    detectors: {:?}", vert_names(graph, always_detectors.iter().enumerate().filter(|x| *x.1).map(|x| x.0)));
+                println!("never     detectors: {:?}", vert_names(graph, never_detectors.iter().enumerate().filter(|x| *x.1).map(|x| x.0)));
+                println!("sometimes detectors: {:?}", vert_names(graph, sometimes_detectors.iter().enumerate().filter(|x| *x.1).map(|x| x.0)));
+            }
+            None => println!("no solution"),
+        }
+    }
+
     solutions
 }
 fn test_shape(shape: &BTreeSet<(i32, i32)>, grid: &Grid, param: &Param, log: bool) -> Option<(BTreeSet<(i32, i32)>, (i32, i32), (i32, i32), usize)> {
@@ -310,20 +358,26 @@ fn test_shape(shape: &BTreeSet<(i32, i32)>, grid: &Grid, param: &Param, log: boo
     let context = Context::new(&Default::default());
     let verts: BTreeMap<(i32, i32), Bool> = shape.iter().copied().map(|p| (p, Bool::new_const(&context, format!("v{},{}", p.0, p.1)))).collect();
     let tiling_index = Int::new_const(&context, "tidx");
-    let dom_int = Int::from_u64(&context, param.dom as u64);
-    let disty_int = Int::from_u64(&context, param.disty as u64);
 
     let s = Optimize::new(&context);
     let detector_count = count(&context, verts.values());
     s.minimize(&detector_count);
 
     for p in interior.iter().copied() {
-        s.assert(&count_det_tiling(&context, &verts, &dom_set(p, grid.adj, param.open_dom), &identity_map).ge(&dom_int));
+        let (group, dom) = param.dom_set(&context, (p, &verts[&p]), &grid.adj);
+        if let Some(dom) = dom {
+            s.assert(&count_det_tiling(&context, &verts, &group, &identity_map).ge(&dom));
+        }
     }
     for pq in interior.iter().copied().combinations(2) {
         let (p, q) = (pq[0], pq[1]);
-        if distances.get(p, q) < param.disty_dist_limit {
-            s.assert(&count_det_tiling(&context, &verts, &disty_set(p, q, grid.adj, param.open_dom), &identity_map).ge(&disty_int));
+        let (group, alt, disty) = param.disty_set(&context, (p, &verts[&p]), (q, &verts[&q]), &grid.adj, &distances);
+        if let Some(disty) = disty {
+            let mut value = count_det_tiling(&context, &verts, &group, &identity_map);
+            if let Some(alt) = alt {
+                value = max(&context, &value, &count_det_tiling(&context, &verts, &alt, &identity_map));
+            }
+            s.assert(&value.ge(&disty));
         }
     }
 
@@ -332,13 +386,23 @@ fn test_shape(shape: &BTreeSet<(i32, i32)>, grid: &Grid, param: &Param, log: boo
         let mut solution = Bool::from_bool(&context, true);
         for p in inflated.iter().copied() {
             if !interior.contains(&p) {
-                solution &= count_det_tiling(&context, &verts, &dom_set(p, &grid.adj, param.open_dom), tiling).ge(&dom_int);
+                let (group, dom) = param.dom_set(&context, (p, &verts[&tiling[&p]]), &grid.adj);
+                if let Some(dom) = dom {
+                    solution &= count_det_tiling(&context, &verts, &group, &identity_map).ge(&dom);
+                }
             }
         }
         for pq in inflated.iter().copied().combinations(2) {
             let (p, q) = (pq[0], pq[1]);
-            if (!interior.contains(&p) || !interior.contains(&q)) && distances.get(p, q) < param.disty_dist_limit {
-                solution &= count_det_tiling(&context, &verts, &disty_set(p, q, grid.adj, param.open_dom), tiling).ge(&disty_int);
+            if !interior.contains(&p) || !interior.contains(&q) {
+                let (group, alt, disty) = param.disty_set(&context, (p, &verts[&tiling[&p]]), (q, &verts[&tiling[&q]]), &grid.adj, &distances);
+                if let Some(disty) = disty {
+                    let mut value = count_det_tiling(&context, &verts, &group, &identity_map);
+                    if let Some(alt) = alt {
+                        value = max(&context, &value, &count_det_tiling(&context, &verts, &alt, &identity_map));
+                    }
+                    s.assert(&value.ge(&disty));
+                }
             }
         }
         solution &= tiling_index._eq(&Int::from_u64(&context, i as u64));
@@ -418,6 +482,25 @@ impl Graph {
         Ok(Graph { verts: verts.into_iter().map(|(name, adj)| (name, adj.into_iter().collect())).collect() })
     }
 }
+impl fmt::Display for Graph {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        let mut tokens = vec![];
+        for (v_name, adj) in self.verts.iter() {
+            for &u in adj.iter() {
+                let u_name = &self.verts[u].0;
+                if human_sort::compare(v_name, u_name) == Ordering::Less {
+                    tokens.push(format!("{}:{}", v_name, u_name));
+                }
+            }
+        }
+        tokens.sort_by(|a, b| human_sort::compare(a, b));
+        write!(f, "{{")?;
+        for token in tokens.iter() {
+            write!(f, " {}", token)?;
+        }
+        write!(f, " }}")
+    }
+}
 
 fn main() {
     match Mode::parse() {
@@ -426,13 +509,14 @@ fn main() {
             println!("checking {} {}\n", param.name, grid.name);
             print_result(&shape, &test_shape(&shape, &grid, &param, true))
         }
-        Mode::Finite { src, param, all, max_solutions } => {
+        Mode::Finite { src, param, all } => {
             let graph = if src == "-" {
                 Graph::read(&mut BufReader::new(io::stdin().lock())).unwrap()
             } else {
                 Graph::read(&mut BufReader::new(File::open(src).unwrap())).unwrap()
             };
-            test_graph(&graph, &param, if all { usize::MAX } else { max_solutions }, true);
+            println!("checking {}\nG = {}\nn = {}\ne = {}\n", param.name, graph, graph.verts.len(), graph.verts.iter().map(|x| x.1.len()).sum::<usize>() / 2);
+            test_graph(&graph, &param, all, true);
         }
     }
 }
