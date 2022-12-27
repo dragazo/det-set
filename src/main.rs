@@ -5,15 +5,16 @@ use std::io::{self, BufRead, BufReader};
 use std::cmp::Ordering;
 use std::fs::File;
 use std::{iter, fmt};
+use std::fmt::Write;
 
 use itertools::Itertools;
 use clap::Parser;
 
 use z3::{Context, Optimize, SatResult};
-use z3::ast::{Bool, Int, Ast};
+use z3::ast::{Bool, Real, Int, Ast};
 
 type Adj<'a, P> = dyn 'a + Fn(P) -> BTreeSet<P>;
-type Counter<'ctx, P> = dyn 'ctx + Fn(&BTreeSet<P>) -> Int<'ctx>;
+type Counter<'ctx, P> = dyn 'ctx + Fn(&BTreeSet<P>) -> Real<'ctx>;
 
 trait Point: Copy + Ord {}
 impl Point for (i32, i32) {}
@@ -70,20 +71,29 @@ fn test_get_size() {
         }
     }
 }
-fn print_shape(shape: &BTreeSet<(i32, i32)>, detectors: &BTreeSet<(i32, i32)>) {
-    let (mut row, mut col) = (0, 0);
+fn print_shape(shape: &BTreeSet<(i32, i32)>, detectors: &BTreeMap<(i32, i32), (i64, i64)>) {
+    let (rows, cols) = get_size(shape);
+    let mut table = vec![vec![String::new(); cols]; rows];
+
     for (r, c) in shape.iter().copied() {
-        if r != row {
-            println!();
-            (row, col) = (r, 0);
-        }
-        for _ in 0..(c - col) {
-            print!("{}", ' ');
-        }
-        print!("{}", if detectors.contains(&(r, c)) { '1' } else { '0' });
-        col = c;
+        table[r as usize][c as usize] = match detectors.get(&(r, c)).copied() {
+            Some((p, q)) => if p == q { '1'.into() } else if p == 0 { '0'.into() } else { format!("({p}/{q})") },
+            None => ' '.into(),
+        };
     }
-    println!();
+
+    let col_widths: Vec<_> = (0..cols).map(|c| table.iter().map(|row| row[c].len()).max().unwrap_or(0)).collect();
+
+    for row in table.iter() {
+        for (value, &width) in iter::zip(row, &col_widths) {
+            debug_assert!(value.len() <= width);
+            let h = (width - value.len()) / 2;
+            for _ in 0..h { print!(" ") }
+            print!("{value}");
+            for _ in h..(width - value.len()) { print!(" ") }
+        }
+        println!();
+    }
 }
 
 fn inflate<P: Point>(shape: &BTreeSet<P>, adj: &Adj<P>, radius: usize) -> BTreeSet<P> {
@@ -155,14 +165,13 @@ fn get_tilings(shape: &BTreeSet<(i32, i32)>) -> Vec<(BTreeMap<(i32, i32), (i32, 
     tilings.into_iter().map(|(tiling, (b1, b2))| (tiling, b1, b2)).collect()
 }
 
-fn max<'ctx>(a: &Int<'ctx>, b: &Int<'ctx>) -> Int<'ctx> {
+fn max<'ctx>(a: &Real<'ctx>, b: &Real<'ctx>) -> Real<'ctx> {
     a.ge(b).ite(a, b)
 }
-fn count<'ctx, 'a, I>(context: &'ctx Context, iter: I) -> Int<'ctx> where 'ctx: 'a, I: Iterator<Item = &'a Bool<'ctx>> {
-    let (zero, one) = (Int::from_u64(context, 0), Int::from_u64(context, 1));
-    let mut res = zero.clone();
+fn sum<'ctx, 'a, I>(context: &'ctx Context, iter: I) -> Real<'ctx> where 'ctx: 'a, I: Iterator<Item = &'a Real<'ctx>> {
+    let mut res = Real::from_real(context, 0, 1);
     for v in iter {
-        res += v.ite(&one, &zero);
+        res += v;
     }
     res
 }
@@ -191,6 +200,7 @@ struct Param {
     disty: usize,
     sharp_disty: bool,
     disty_dist_limit: usize,
+    fractional: bool,
 }
 impl Param {
     fn dom_region<P: Point>(&self, p: P, adj: &Adj<P>) -> BTreeSet<P> {
@@ -199,16 +209,16 @@ impl Param {
         else { assert!(!res.contains(&p)); }
         res
     }
-    fn check_dom<'ctx, P: Point>(&self, context: &'ctx Context, p: (P, &Bool<'ctx>), adj: &Adj<P>, counter: &Counter<'ctx, P>) -> Option<Bool<'ctx>> {
+    fn check_dom<'ctx, P: Point>(&self, context: &'ctx Context, p: (P, &Real<'ctx>), adj: &Adj<P>, counter: &Counter<'ctx, P>) -> Option<Bool<'ctx>> {
         if self.dom == 0 { return None }
-        Some(counter(&self.dom_region(p.0, adj)).ge(&Int::from_u64(context, self.dom as u64)))
+        Some(counter(&self.dom_region(p.0, adj)).ge(&Real::from_real(context, self.dom as i32, 1)))
     }
-    fn check_disty<'ctx, P: Point>(&self, context: &'ctx Context, p: (P, &Bool<'ctx>), q: (P, &Bool<'ctx>), adj: &Adj<P>, distances: &Distances<P>, counter: &Counter<'ctx, P>) -> Option<Bool<'ctx>> {
+    fn check_disty<'ctx, P: Point>(&self, context: &'ctx Context, p: (P, &Real<'ctx>), q: (P, &Real<'ctx>), adj: &Adj<P>, distances: &Distances<P>, counter: &Counter<'ctx, P>) -> Option<Bool<'ctx>> {
         if self.disty == 0 || distances.get(p.0, q.0) >= self.disty_dist_limit { return None }
         let regions = (self.dom_region(p.0, adj), self.dom_region(q.0, adj));
         Some(match self.sharp_disty {
-            false => counter(&regions.0.symmetric_difference(&regions.1).copied().collect()).ge(&Int::from_u64(context, self.disty as u64)),
-            true => max(&counter(&(&regions.0 - &regions.1)), &counter(&(&regions.1 - &regions.0))).ge(&Int::from_u64(context, self.disty as u64)),
+            false => counter(&regions.0.symmetric_difference(&regions.1).copied().collect()).ge(&Real::from_real(context, self.disty as i32, 1)),
+            true => max(&counter(&(&regions.0 - &regions.1)), &counter(&(&regions.1 - &regions.0))).ge(&Real::from_real(context, self.disty as i32, 1)),
         })
     }
 }
@@ -216,14 +226,14 @@ impl FromStr for Param {
     type Err = String;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         Ok(match s.trim().to_lowercase().as_str() {
-            "old"                            => Param { name: "OLD",     open_dom: true,  dom: 1, disty: 1, sharp_disty: false, disty_dist_limit: 3 },
-            "red:old" | "red-old" | "redold" => Param { name: "RED:OLD", open_dom: true,  dom: 2, disty: 2, sharp_disty: false, disty_dist_limit: 3 },
-            "det:old" | "det-old" | "detold" => Param { name: "DET:OLD", open_dom: true,  dom: 2, disty: 2, sharp_disty: true,  disty_dist_limit: 3 },
-            "err:old" | "err-old" | "errold" => Param { name: "ERR:OLD", open_dom: true,  dom: 3, disty: 3, sharp_disty: false, disty_dist_limit: 3 },
-            "ic"                             => Param { name: "IC",      open_dom: false, dom: 1, disty: 1, sharp_disty: false, disty_dist_limit: 3 },
-            "red:ic" | "red-ic" | "redic"    => Param { name: "RED:IC",  open_dom: false, dom: 2, disty: 2, sharp_disty: false, disty_dist_limit: 3 },
-            "det:ic" | "det-ic" | "detic"    => Param { name: "DET:IC",  open_dom: false, dom: 2, disty: 2, sharp_disty: true,  disty_dist_limit: 3 },
-            "err:ic" | "err-ic" | "erric"    => Param { name: "ERR:IC",  open_dom: false, dom: 3, disty: 3, sharp_disty: false, disty_dist_limit: 3 },
+            "old"                            => Param { name: "OLD",     open_dom: true,  dom: 1, disty: 1, sharp_disty: false, disty_dist_limit: 3, fractional: false },
+            "red:old" | "red-old" | "redold" => Param { name: "RED:OLD", open_dom: true,  dom: 2, disty: 2, sharp_disty: false, disty_dist_limit: 3, fractional: false },
+            "det:old" | "det-old" | "detold" => Param { name: "DET:OLD", open_dom: true,  dom: 2, disty: 2, sharp_disty: true,  disty_dist_limit: 3, fractional: false },
+            "err:old" | "err-old" | "errold" => Param { name: "ERR:OLD", open_dom: true,  dom: 3, disty: 3, sharp_disty: false, disty_dist_limit: 3, fractional: false },
+            "ic"                             => Param { name: "IC",      open_dom: false, dom: 1, disty: 1, sharp_disty: false, disty_dist_limit: 3, fractional: false },
+            "red:ic" | "red-ic" | "redic"    => Param { name: "RED:IC",  open_dom: false, dom: 2, disty: 2, sharp_disty: false, disty_dist_limit: 3, fractional: false },
+            "det:ic" | "det-ic" | "detic"    => Param { name: "DET:IC",  open_dom: false, dom: 2, disty: 2, sharp_disty: true,  disty_dist_limit: 3, fractional: false },
+            "err:ic" | "err-ic" | "erric"    => Param { name: "ERR:IC",  open_dom: false, dom: 3, disty: 3, sharp_disty: false, disty_dist_limit: 3, fractional: false },
             _ => return Err(format!("unknown param type: '{}'", s)),
         })
     }
@@ -243,20 +253,29 @@ fn test_gcd() {
     assert_eq!(gcd(1071, 462), 21); assert_eq!(gcd(462, 1071), 21);
 }
 
-fn test_graph(graph: &Graph, param: &Param, exhaustive: bool, log: bool) -> Vec<BTreeSet<usize>> {
+fn test_graph(graph: &Graph, param: &Param, exhaustive: bool, log: bool) -> Vec<BTreeMap<usize, (i64, i64)>> {
     let n = graph.verts.len();
     let adj = |p: usize| graph.verts[p].1.iter().copied().collect();
     let distances = Distances::within_shape(&(0..n).collect(), &adj);
 
     let context = Context::new(&Default::default());
-    let verts: Vec<Bool> = (0..n).map(|p| Bool::new_const(&context, format!("v{p}"))).collect();
+    let verts: Vec<Real> = (0..n).map(|p| Real::new_const(&context, format!("v{p}"))).collect();
 
     let s = Optimize::new(&context);
-    let detector_count = count(&context, verts.iter());
+    let detector_count = sum(&context, verts.iter());
     s.minimize(&detector_count);
 
-    let count_det = |points: &BTreeSet<usize>| -> Int {
-        count(&context, points.iter().copied().map(|p| &verts[p]))
+    let zero = Real::from_real(&context, 0, 1);
+    let one = Real::from_real(&context, 1, 1);
+    for v in verts.iter() {
+        match param.fractional {
+            true => s.assert(&(v.ge(&zero) & v.le(&one))),
+            false => s.assert(&(v._eq(&zero) | v._eq(&one))),
+        }
+    }
+
+    let count_det = |points: &BTreeSet<usize>| -> Real {
+        sum(&context, points.iter().copied().map(|p| &verts[p]))
     };
 
     for p in 0..n {
@@ -271,25 +290,28 @@ fn test_graph(graph: &Graph, param: &Param, exhaustive: bool, log: bool) -> Vec<
         }
     }
 
-    fn solution_string<I: Iterator<Item = usize>>(graph: &Graph, verts: I) -> String {
-        let mut names: Vec<_> = verts.map(|v| graph.verts[v].0.as_str()).collect();
-        numeric_sort::sort(&mut names);
+    fn solution_string<I: Iterator<Item = (usize, (i64, i64))>>(graph: &Graph, verts: I) -> String {
+        let mut names: Vec<_> = verts.map(|v| (graph.verts[v.0].0.as_str(), v.1)).collect();
+        names.sort_by(|a, b| numeric_sort::cmp(a.0, b.0));
         let mut res = String::new();
         res.push('{');
-        for name in names {
+        for (name, (p, q)) in names {
             res.push(' ');
             res.push_str(name);
+            if p != q {
+                write!(res, "({p}/{q})").unwrap();
+            }
         }
         res.push_str(" }");
         res
     }
 
-    let mut solutions: Vec<BTreeSet<usize>> = vec![];
+    let mut solutions: Vec<BTreeMap<usize, (i64, i64)>> = vec![];
     loop {
         match s.check(&[]) {
             SatResult::Sat => {
                 let model = s.get_model().unwrap();
-                let detectors: BTreeSet<usize> = verts.iter().enumerate().filter(|(_, v)| model.eval(*v, false).unwrap().as_bool().unwrap()).map(|(p, _)| p).collect();
+                let detectors: BTreeMap<usize, (i64, i64)> = verts.iter().enumerate().map(|(i, v)| (i, model.eval(v, false).unwrap().as_real().unwrap())).filter(|(_, (num, _))| *num != 0).collect();
 
                 let prev_size = solutions.first().map(|s| s.len()).unwrap_or(detectors.len());
                 assert!(prev_size <= detectors.len());
@@ -297,12 +319,13 @@ fn test_graph(graph: &Graph, param: &Param, exhaustive: bool, log: bool) -> Vec<
 
                 let mut different_answer = Bool::from_bool(&context, false);
                 for (i, v) in verts.iter().enumerate() {
-                    different_answer |= v._eq(&Bool::from_bool(&context, detectors.contains(&i))).not();
+                    let (p, q) = detectors.get(&i).copied().unwrap_or((0, 1));
+                    different_answer |= v._eq(&Real::from_real(&context, p as i32, q as i32)).not();
                 }
                 s.assert(&different_answer);
 
                 if log {
-                    println!("solution {}: {}", solutions.len() + 1, solution_string(graph, detectors.iter().copied()));
+                    println!("solution {}: {}", solutions.len() + 1, solution_string(graph, detectors.iter().map(|x| (*x.0, *x.1))));
                 }
 
                 solutions.push(detectors);
@@ -324,16 +347,16 @@ fn test_graph(graph: &Graph, param: &Param, exhaustive: bool, log: bool) -> Vec<
                     let mut never_detectors = vec![true; n];
                     for solution in solutions.iter() {
                         for i in 0..n {
-                            let is_detector = solution.contains(&i);
+                            let is_detector = solution.contains_key(&i);
                             if is_detector { never_detectors[i] = false; }
                             else { always_detectors[i] = false; }
                         }
                     }
                     let sometimes_detectors: Vec<_> = iter::zip(&always_detectors, &never_detectors).map(|(a, b)| !a && !b).collect();
 
-                    println!("always    detectors: {}", solution_string(graph,    always_detectors.iter().enumerate().filter(|x| *x.1).map(|x| x.0)));
-                    println!("never     detectors: {}", solution_string(graph,     never_detectors.iter().enumerate().filter(|x| *x.1).map(|x| x.0)));
-                    println!("sometimes detectors: {}", solution_string(graph, sometimes_detectors.iter().enumerate().filter(|x| *x.1).map(|x| x.0)));
+                    println!("always    detectors: {}", solution_string(graph,    always_detectors.iter().enumerate().filter(|x| *x.1).map(|x| (x.0, (1, 1)))));
+                    println!("never     detectors: {}", solution_string(graph,     never_detectors.iter().enumerate().filter(|x| *x.1).map(|x| (x.0, (1, 1)))));
+                    println!("sometimes detectors: {}", solution_string(graph, sometimes_detectors.iter().enumerate().filter(|x| *x.1).map(|x| (x.0, (1, 1)))));
                 }
             }
             None => println!("no solution"),
@@ -342,7 +365,7 @@ fn test_graph(graph: &Graph, param: &Param, exhaustive: bool, log: bool) -> Vec<
 
     solutions
 }
-fn test_tiling(shape: &BTreeSet<(i32, i32)>, grid: &Grid, param: &Param, log: bool) -> Option<(BTreeSet<(i32, i32)>, (i32, i32), (i32, i32), usize)> {
+fn test_tiling(shape: &BTreeSet<(i32, i32)>, grid: &Grid, param: &Param, log: bool) -> Option<(BTreeMap<(i32, i32), (i64, i64)>, (i32, i32), (i32, i32), usize)> {
     if log {
         println!("tile shape:");
         print_shape(&shape, &Default::default());
@@ -358,15 +381,24 @@ fn test_tiling(shape: &BTreeSet<(i32, i32)>, grid: &Grid, param: &Param, log: bo
     }
 
     let context = Context::new(&Default::default());
-    let verts: BTreeMap<(i32, i32), Bool> = shape.iter().copied().map(|p| (p, Bool::new_const(&context, format!("v{},{}", p.0, p.1)))).collect();
+    let verts: BTreeMap<(i32, i32), Real> = shape.iter().copied().map(|p| (p, Real::new_const(&context, format!("v{},{}", p.0, p.1)))).collect();
     let tiling_index = Int::new_const(&context, "tidx");
 
     let s = Optimize::new(&context);
-    let detector_count = count(&context, verts.values());
+    let detector_count = sum(&context, verts.values());
     s.minimize(&detector_count);
 
-    let count_det = |points: &BTreeSet<(i32, i32)>, tiling: &BTreeMap<(i32, i32), (i32, i32)>| -> Int {
-        count(&context, points.iter().map(|p| &verts[&tiling[p]]))
+    let zero = Real::from_real(&context, 0, 1);
+    let one = Real::from_real(&context, 1, 1);
+    for (_, v) in verts.iter() {
+        match param.fractional {
+            true => s.assert(&(v.ge(&zero) & v.le(&one))),
+            false => s.assert(&(v._eq(&zero) | v._eq(&one))),
+        }
+    }
+
+    let count_det = |points: &BTreeSet<(i32, i32)>, tiling: &BTreeMap<(i32, i32), (i32, i32)>| -> Real {
+        sum(&context, points.iter().map(|p| &verts[&tiling[p]]))
     };
 
     let identity_map = shape.iter().copied().map(|p| (p, p)).collect();
@@ -414,7 +446,7 @@ fn test_tiling(shape: &BTreeSet<(i32, i32)>, grid: &Grid, param: &Param, log: bo
     match s.check(&[]) {
         SatResult::Sat => {
             let model = s.get_model().unwrap();
-            let detectors = verts.iter().filter(|(_, v)| model.eval(*v, false).unwrap().as_bool().unwrap()).map(|(p, _)| *p).collect();
+            let detectors = verts.iter().map(|(p, v)| (*p, model.eval(v, false).unwrap().as_real().unwrap())).filter(|(_, (num, _))| *num != 0).collect();
             let tidx = model.eval(&tiling_index, false).unwrap().as_u64().unwrap() as usize;
             Some((detectors, tilings[tidx].1, tilings[tidx].2, tidx))
         }
@@ -422,7 +454,7 @@ fn test_tiling(shape: &BTreeSet<(i32, i32)>, grid: &Grid, param: &Param, log: bo
         SatResult::Unknown => unreachable!(),
     }
 }
-fn print_result(shape: &BTreeSet<(i32, i32)>, res: &Option<(BTreeSet<(i32, i32)>, (i32, i32), (i32, i32), usize)>) {
+fn print_result(shape: &BTreeSet<(i32, i32)>, res: &Option<(BTreeMap<(i32, i32), (i64, i64)>, (i32, i32), (i32, i32), usize)>) {
     match res {
         Some((detectors, b1, b2, tidx)) => {
             println!("found minimum:");
