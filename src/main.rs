@@ -273,7 +273,7 @@ fn test_graph(graph: &Graph, param: &Param, exhaustive: bool, log: bool) -> Vec<
 
     fn solution_string<I: Iterator<Item = usize>>(graph: &Graph, verts: I) -> String {
         let mut names: Vec<_> = verts.map(|v| graph.verts[v].0.as_str()).collect();
-        human_sort::sort(&mut names);
+        numeric_sort::sort(&mut names);
         let mut res = String::new();
         res.push('{');
         for name in names {
@@ -342,7 +342,7 @@ fn test_graph(graph: &Graph, param: &Param, exhaustive: bool, log: bool) -> Vec<
 
     solutions
 }
-fn test_shape(shape: &BTreeSet<(i32, i32)>, grid: &Grid, param: &Param, log: bool) -> Option<(BTreeSet<(i32, i32)>, (i32, i32), (i32, i32), usize)> {
+fn test_tiling(shape: &BTreeSet<(i32, i32)>, grid: &Grid, param: &Param, log: bool) -> Option<(BTreeSet<(i32, i32)>, (i32, i32), (i32, i32), usize)> {
     if log {
         println!("tile shape:");
         print_shape(&shape, &Default::default());
@@ -480,6 +480,25 @@ impl Graph {
 
         Ok(Graph { verts: verts.into_iter().map(|(name, adj)| (name, adj.into_iter().collect())).collect() })
     }
+    fn by_adj<T, N, A>(points: &[T], namer: N, is_adj: A) -> Self where N: Fn(&T) -> String, A: Fn(&T, &T) -> bool {
+        let mut verts = Vec::with_capacity(points.len());
+        for (i, v) in points.iter().enumerate() {
+            let mut v_adj = vec![];
+            for (j, u) in points.iter().enumerate() {
+                if i == j { continue }
+                let adj = is_adj(v, u);
+                debug_assert_eq!(adj, is_adj(u, v));
+                if adj { v_adj.push(j); }
+            }
+            verts.push((namer(v), v_adj));
+        }
+        Self { verts }
+    }
+    fn hypercube(dims: usize) -> Self {
+        assert!(dims <= 30); // anything this big is unrealistic anyway
+        let verts: Vec<usize> = (0..(1 << dims)).collect();
+        Self::by_adj(&verts, |&x| format!("{x:b}"), |&a, &b| (a ^ b).is_power_of_two())
+    }
 }
 impl fmt::Display for Graph {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
@@ -487,12 +506,12 @@ impl fmt::Display for Graph {
         for (v_name, adj) in self.verts.iter() {
             for &u in adj.iter() {
                 let u_name = &self.verts[u].0;
-                if human_sort::compare(v_name, u_name) == Ordering::Less {
+                if numeric_sort::cmp(v_name, u_name) == Ordering::Less {
                     tokens.push(format!("{}:{}", v_name, u_name));
                 }
             }
         }
-        tokens.sort_by(|a, b| human_sort::compare(a, b));
+        numeric_sort::sort(&mut tokens);
         write!(f, "{{")?;
         for token in tokens.iter() {
             write!(f, " {}", token)?;
@@ -534,14 +553,26 @@ fn main() {
         Mode::Rect { rows, cols, grid, param } => {
             let shape = rect(rows.get(), cols.get());
             println!("checking {} {}\n", param.name, grid.name);
-            print_result(&shape, &test_shape(&shape, &grid, &param, true))
+            print_result(&shape, &test_tiling(&shape, &grid, &param, true))
         }
         Mode::Finite { src, param, all } => {
-            let graph = if src == "-" {
-                Graph::read(&mut BufReader::new(io::stdin().lock())).unwrap()
-            } else {
-                Graph::read(&mut BufReader::new(File::open(src).unwrap())).unwrap()
+            let graph = match src.as_str() {
+                "-" => Graph::read(&mut BufReader::new(io::stdin())).unwrap(),
+                x => {
+                    let special = {
+                        if !x.is_empty() && x.chars().next().unwrap().to_ascii_uppercase() == 'Q' {
+                            if let Ok(n) = x[1..].parse() { Some(Graph::hypercube(n)) } else { None }
+                        } else {
+                            None
+                        }
+                    };
+                    match special {
+                        Some(x) => x,
+                        None => Graph::read(&mut BufReader::new(File::open(x).unwrap())).unwrap(),
+                    }
+                }
             };
+
             println!("checking {}\nG = {}\nn = {}\ne = {}\n", param.name, graph, graph.verts.len(), graph.verts.iter().map(|x| x.1.len()).sum::<usize>() / 2);
             test_graph(&graph, &param, all, true);
         }

@@ -8,5 +8,5 @@ edition = "2021"
 [dependencies]
 itertools = "0.10.3"
 clap = { version = "3.2.1", features = ["derive"] }
-human-sort = "0.2.2"
+numeric-sort = "0.1.0"
 z3 = "0.11.2"
