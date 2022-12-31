@@ -234,6 +234,16 @@ impl FromStr for Param {
             "red:ic" | "red-ic" | "redic"    => Param { name: "RED:IC",  open_dom: false, dom: 2, disty: 2, sharp_disty: false, disty_dist_limit: 3, fractional: false },
             "det:ic" | "det-ic" | "detic"    => Param { name: "DET:IC",  open_dom: false, dom: 2, disty: 2, sharp_disty: true,  disty_dist_limit: 3, fractional: false },
             "err:ic" | "err-ic" | "erric"    => Param { name: "ERR:IC",  open_dom: false, dom: 3, disty: 3, sharp_disty: false, disty_dist_limit: 3, fractional: false },
+
+            "f:old" | "fold"                      => Param { name: "OLD",     open_dom: true,  dom: 1, disty: 1, sharp_disty: false, disty_dist_limit: 3, fractional: true },
+            "f:red:old" | "f-red-old" | "fredold" => Param { name: "RED:OLD", open_dom: true,  dom: 2, disty: 2, sharp_disty: false, disty_dist_limit: 3, fractional: true },
+            "f:det:old" | "f-det-old" | "fdetold" => Param { name: "DET:OLD", open_dom: true,  dom: 2, disty: 2, sharp_disty: true,  disty_dist_limit: 3, fractional: true },
+            "f:err:old" | "f-err-old" | "ferrold" => Param { name: "ERR:OLD", open_dom: true,  dom: 3, disty: 3, sharp_disty: false, disty_dist_limit: 3, fractional: true },
+            "f:ic" | "fic"                        => Param { name: "IC",      open_dom: false, dom: 1, disty: 1, sharp_disty: false, disty_dist_limit: 3, fractional: true },
+            "f:red:ic" | "f-red-ic" | "fredic"    => Param { name: "RED:IC",  open_dom: false, dom: 2, disty: 2, sharp_disty: false, disty_dist_limit: 3, fractional: true },
+            "f:det:ic" | "f-det-ic" | "fdetic"    => Param { name: "DET:IC",  open_dom: false, dom: 2, disty: 2, sharp_disty: true,  disty_dist_limit: 3, fractional: true },
+            "f:err:ic" | "f-err-ic" | "ferric"    => Param { name: "ERR:IC",  open_dom: false, dom: 3, disty: 3, sharp_disty: false, disty_dist_limit: 3, fractional: true },
+
             _ => return Err(format!("unknown param type: '{}'", s)),
         })
     }
