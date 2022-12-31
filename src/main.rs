@@ -201,6 +201,7 @@ struct Param {
     sharp_disty: bool,
     disty_dist_limit: usize,
     fractional: bool,
+    efficient: bool,
 }
 impl Param {
     fn dom_region<P: Point>(&self, p: P, adj: &Adj<P>) -> BTreeSet<P> {
@@ -211,7 +212,9 @@ impl Param {
     }
     fn check_dom<'ctx, P: Point>(&self, context: &'ctx Context, p: (P, &Real<'ctx>), adj: &Adj<P>, counter: &Counter<'ctx, P>) -> Option<Bool<'ctx>> {
         if self.dom == 0 { return None }
-        Some(counter(&self.dom_region(p.0, adj)).ge(&Real::from_real(context, self.dom as i32, 1)))
+        let value = counter(&self.dom_region(p.0, adj));
+        let min = Real::from_real(context, self.dom as i32, 1);
+        Some(if self.efficient { value._eq(&min) } else { value.ge(&min) })
     }
     fn check_disty<'ctx, P: Point>(&self, context: &'ctx Context, p: (P, &Real<'ctx>), q: (P, &Real<'ctx>), adj: &Adj<P>, distances: &Distances<P>, counter: &Counter<'ctx, P>) -> Option<Bool<'ctx>> {
         if self.disty == 0 || distances.get(p.0, q.0) >= self.disty_dist_limit { return None }
@@ -226,23 +229,41 @@ impl FromStr for Param {
     type Err = String;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         Ok(match s.trim().to_lowercase().as_str() {
-            "old"                            => Param { name: "OLD",     open_dom: true,  dom: 1, disty: 1, sharp_disty: false, disty_dist_limit: 3, fractional: false },
-            "red:old" | "red-old" | "redold" => Param { name: "RED:OLD", open_dom: true,  dom: 2, disty: 2, sharp_disty: false, disty_dist_limit: 3, fractional: false },
-            "det:old" | "det-old" | "detold" => Param { name: "DET:OLD", open_dom: true,  dom: 2, disty: 2, sharp_disty: true,  disty_dist_limit: 3, fractional: false },
-            "err:old" | "err-old" | "errold" => Param { name: "ERR:OLD", open_dom: true,  dom: 3, disty: 3, sharp_disty: false, disty_dist_limit: 3, fractional: false },
-            "ic"                             => Param { name: "IC",      open_dom: false, dom: 1, disty: 1, sharp_disty: false, disty_dist_limit: 3, fractional: false },
-            "red:ic" | "red-ic" | "redic"    => Param { name: "RED:IC",  open_dom: false, dom: 2, disty: 2, sharp_disty: false, disty_dist_limit: 3, fractional: false },
-            "det:ic" | "det-ic" | "detic"    => Param { name: "DET:IC",  open_dom: false, dom: 2, disty: 2, sharp_disty: true,  disty_dist_limit: 3, fractional: false },
-            "err:ic" | "err-ic" | "erric"    => Param { name: "ERR:IC",  open_dom: false, dom: 3, disty: 3, sharp_disty: false, disty_dist_limit: 3, fractional: false },
+            "old"                            => Param { name: "OLD",     open_dom: true,  dom: 1, disty: 1, sharp_disty: false, disty_dist_limit: 3, fractional: false, efficient: false },
+            "red:old" | "red-old" | "redold" => Param { name: "RED:OLD", open_dom: true,  dom: 2, disty: 2, sharp_disty: false, disty_dist_limit: 3, fractional: false, efficient: false },
+            "det:old" | "det-old" | "detold" => Param { name: "DET:OLD", open_dom: true,  dom: 2, disty: 2, sharp_disty: true,  disty_dist_limit: 3, fractional: false, efficient: false },
+            "err:old" | "err-old" | "errold" => Param { name: "ERR:OLD", open_dom: true,  dom: 3, disty: 3, sharp_disty: false, disty_dist_limit: 3, fractional: false, efficient: false },
+            "ic"                             => Param { name: "IC",      open_dom: false, dom: 1, disty: 1, sharp_disty: false, disty_dist_limit: 3, fractional: false, efficient: false },
+            "red:ic" | "red-ic" | "redic"    => Param { name: "RED:IC",  open_dom: false, dom: 2, disty: 2, sharp_disty: false, disty_dist_limit: 3, fractional: false, efficient: false },
+            "det:ic" | "det-ic" | "detic"    => Param { name: "DET:IC",  open_dom: false, dom: 2, disty: 2, sharp_disty: true,  disty_dist_limit: 3, fractional: false, efficient: false },
+            "err:ic" | "err-ic" | "erric"    => Param { name: "ERR:IC",  open_dom: false, dom: 3, disty: 3, sharp_disty: false, disty_dist_limit: 3, fractional: false, efficient: false },
 
-            "f:old" | "fold"                      => Param { name: "F:OLD",     open_dom: true,  dom: 1, disty: 1, sharp_disty: false, disty_dist_limit: 3, fractional: true },
-            "f:red:old" | "f-red-old" | "fredold" => Param { name: "F:RED:OLD", open_dom: true,  dom: 2, disty: 2, sharp_disty: false, disty_dist_limit: 3, fractional: true },
-            "f:det:old" | "f-det-old" | "fdetold" => Param { name: "F:DET:OLD", open_dom: true,  dom: 2, disty: 2, sharp_disty: true,  disty_dist_limit: 3, fractional: true },
-            "f:err:old" | "f-err-old" | "ferrold" => Param { name: "F:ERR:OLD", open_dom: true,  dom: 3, disty: 3, sharp_disty: false, disty_dist_limit: 3, fractional: true },
-            "f:ic" | "fic"                        => Param { name: "F:IC",      open_dom: false, dom: 1, disty: 1, sharp_disty: false, disty_dist_limit: 3, fractional: true },
-            "f:red:ic" | "f-red-ic" | "fredic"    => Param { name: "F:RED:IC",  open_dom: false, dom: 2, disty: 2, sharp_disty: false, disty_dist_limit: 3, fractional: true },
-            "f:det:ic" | "f-det-ic" | "fdetic"    => Param { name: "F:DET:IC",  open_dom: false, dom: 2, disty: 2, sharp_disty: true,  disty_dist_limit: 3, fractional: true },
-            "f:err:ic" | "f-err-ic" | "ferric"    => Param { name: "F:ERR:IC",  open_dom: false, dom: 3, disty: 3, sharp_disty: false, disty_dist_limit: 3, fractional: true },
+            "f:old"     | "f-old"     | "fold"    => Param { name: "F:OLD",     open_dom: true,  dom: 1, disty: 1, sharp_disty: false, disty_dist_limit: 3, fractional: true, efficient: false },
+            "f:red:old" | "f-red-old" | "fredold" => Param { name: "F:RED:OLD", open_dom: true,  dom: 2, disty: 2, sharp_disty: false, disty_dist_limit: 3, fractional: true, efficient: false },
+            "f:det:old" | "f-det-old" | "fdetold" => Param { name: "F:DET:OLD", open_dom: true,  dom: 2, disty: 2, sharp_disty: true,  disty_dist_limit: 3, fractional: true, efficient: false },
+            "f:err:old" | "f-err-old" | "ferrold" => Param { name: "F:ERR:OLD", open_dom: true,  dom: 3, disty: 3, sharp_disty: false, disty_dist_limit: 3, fractional: true, efficient: false },
+            "f:ic"     | "f-ic"     | "fic"       => Param { name: "F:IC",      open_dom: false, dom: 1, disty: 1, sharp_disty: false, disty_dist_limit: 3, fractional: true, efficient: false },
+            "f:red:ic" | "f-red-ic" | "fredic"    => Param { name: "F:RED:IC",  open_dom: false, dom: 2, disty: 2, sharp_disty: false, disty_dist_limit: 3, fractional: true, efficient: false },
+            "f:det:ic" | "f-det-ic" | "fdetic"    => Param { name: "F:DET:IC",  open_dom: false, dom: 2, disty: 2, sharp_disty: true,  disty_dist_limit: 3, fractional: true, efficient: false },
+            "f:err:ic" | "f-err-ic" | "ferric"    => Param { name: "F:ERR:IC",  open_dom: false, dom: 3, disty: 3, sharp_disty: false, disty_dist_limit: 3, fractional: true, efficient: false },
+
+            "e:old"     | "e-old"     | "eold"    => Param { name: "E:OLD",     open_dom: true,  dom: 1, disty: 1, sharp_disty: false, disty_dist_limit: 3, fractional: false, efficient: true },
+            "e:red:old" | "e-red-old" | "eredold" => Param { name: "E:RED:OLD", open_dom: true,  dom: 2, disty: 2, sharp_disty: false, disty_dist_limit: 3, fractional: false, efficient: true },
+            "e:det:old" | "e-det-old" | "edetold" => Param { name: "E:DET:OLD", open_dom: true,  dom: 2, disty: 2, sharp_disty: true,  disty_dist_limit: 3, fractional: false, efficient: true },
+            "e:err:old" | "e-err-old" | "eerrold" => Param { name: "E:ERR:OLD", open_dom: true,  dom: 3, disty: 3, sharp_disty: false, disty_dist_limit: 3, fractional: false, efficient: true },
+            "e:ic"     | "e-ic"     | "eic"       => Param { name: "E:IC",      open_dom: false, dom: 1, disty: 1, sharp_disty: false, disty_dist_limit: 3, fractional: false, efficient: true },
+            "e:red:ic" | "e-red-ic" | "eredic"    => Param { name: "E:RED:IC",  open_dom: false, dom: 2, disty: 2, sharp_disty: false, disty_dist_limit: 3, fractional: false, efficient: true },
+            "e:det:ic" | "e-det-ic" | "edetic"    => Param { name: "E:DET:IC",  open_dom: false, dom: 2, disty: 2, sharp_disty: true,  disty_dist_limit: 3, fractional: false, efficient: true },
+            "e:err:ic" | "e-err-ic" | "eerric"    => Param { name: "E:ERR:IC",  open_dom: false, dom: 3, disty: 3, sharp_disty: false, disty_dist_limit: 3, fractional: false, efficient: true },
+
+            "ef:old"     | "ef-old"     | "efold"    => Param { name: "EF:OLD",     open_dom: true,  dom: 1, disty: 1, sharp_disty: false, disty_dist_limit: 3, fractional: true, efficient: true },
+            "ef:red:old" | "ef-red-old" | "efredold" => Param { name: "EF:RED:OLD", open_dom: true,  dom: 2, disty: 2, sharp_disty: false, disty_dist_limit: 3, fractional: true, efficient: true },
+            "ef:det:old" | "ef-det-old" | "efdetold" => Param { name: "EF:DET:OLD", open_dom: true,  dom: 2, disty: 2, sharp_disty: true,  disty_dist_limit: 3, fractional: true, efficient: true },
+            "ef:err:old" | "ef-err-old" | "eferrold" => Param { name: "EF:ERR:OLD", open_dom: true,  dom: 3, disty: 3, sharp_disty: false, disty_dist_limit: 3, fractional: true, efficient: true },
+            "ef:ic"     | "ef-ic"     | "efic"       => Param { name: "EF:IC",      open_dom: false, dom: 1, disty: 1, sharp_disty: false, disty_dist_limit: 3, fractional: true, efficient: true },
+            "ef:red:ic" | "ef-red-ic" | "efredic"    => Param { name: "EF:RED:IC",  open_dom: false, dom: 2, disty: 2, sharp_disty: false, disty_dist_limit: 3, fractional: true, efficient: true },
+            "ef:det:ic" | "ef-det-ic" | "efdetic"    => Param { name: "EF:DET:IC",  open_dom: false, dom: 2, disty: 2, sharp_disty: true,  disty_dist_limit: 3, fractional: true, efficient: true },
+            "ef:err:ic" | "ef-err-ic" | "eferric"    => Param { name: "EF:ERR:IC",  open_dom: false, dom: 3, disty: 3, sharp_disty: false, disty_dist_limit: 3, fractional: true, efficient: true },
 
             _ => return Err(format!("unknown param type: '{}'", s)),
         })
