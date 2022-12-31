@@ -235,14 +235,14 @@ impl FromStr for Param {
             "det:ic" | "det-ic" | "detic"    => Param { name: "DET:IC",  open_dom: false, dom: 2, disty: 2, sharp_disty: true,  disty_dist_limit: 3, fractional: false },
             "err:ic" | "err-ic" | "erric"    => Param { name: "ERR:IC",  open_dom: false, dom: 3, disty: 3, sharp_disty: false, disty_dist_limit: 3, fractional: false },
 
-            "f:old" | "fold"                      => Param { name: "OLD",     open_dom: true,  dom: 1, disty: 1, sharp_disty: false, disty_dist_limit: 3, fractional: true },
-            "f:red:old" | "f-red-old" | "fredold" => Param { name: "RED:OLD", open_dom: true,  dom: 2, disty: 2, sharp_disty: false, disty_dist_limit: 3, fractional: true },
-            "f:det:old" | "f-det-old" | "fdetold" => Param { name: "DET:OLD", open_dom: true,  dom: 2, disty: 2, sharp_disty: true,  disty_dist_limit: 3, fractional: true },
-            "f:err:old" | "f-err-old" | "ferrold" => Param { name: "ERR:OLD", open_dom: true,  dom: 3, disty: 3, sharp_disty: false, disty_dist_limit: 3, fractional: true },
-            "f:ic" | "fic"                        => Param { name: "IC",      open_dom: false, dom: 1, disty: 1, sharp_disty: false, disty_dist_limit: 3, fractional: true },
-            "f:red:ic" | "f-red-ic" | "fredic"    => Param { name: "RED:IC",  open_dom: false, dom: 2, disty: 2, sharp_disty: false, disty_dist_limit: 3, fractional: true },
-            "f:det:ic" | "f-det-ic" | "fdetic"    => Param { name: "DET:IC",  open_dom: false, dom: 2, disty: 2, sharp_disty: true,  disty_dist_limit: 3, fractional: true },
-            "f:err:ic" | "f-err-ic" | "ferric"    => Param { name: "ERR:IC",  open_dom: false, dom: 3, disty: 3, sharp_disty: false, disty_dist_limit: 3, fractional: true },
+            "f:old" | "fold"                      => Param { name: "F:OLD",     open_dom: true,  dom: 1, disty: 1, sharp_disty: false, disty_dist_limit: 3, fractional: true },
+            "f:red:old" | "f-red-old" | "fredold" => Param { name: "F:RED:OLD", open_dom: true,  dom: 2, disty: 2, sharp_disty: false, disty_dist_limit: 3, fractional: true },
+            "f:det:old" | "f-det-old" | "fdetold" => Param { name: "F:DET:OLD", open_dom: true,  dom: 2, disty: 2, sharp_disty: true,  disty_dist_limit: 3, fractional: true },
+            "f:err:old" | "f-err-old" | "ferrold" => Param { name: "F:ERR:OLD", open_dom: true,  dom: 3, disty: 3, sharp_disty: false, disty_dist_limit: 3, fractional: true },
+            "f:ic" | "fic"                        => Param { name: "F:IC",      open_dom: false, dom: 1, disty: 1, sharp_disty: false, disty_dist_limit: 3, fractional: true },
+            "f:red:ic" | "f-red-ic" | "fredic"    => Param { name: "F:RED:IC",  open_dom: false, dom: 2, disty: 2, sharp_disty: false, disty_dist_limit: 3, fractional: true },
+            "f:det:ic" | "f-det-ic" | "fdetic"    => Param { name: "F:DET:IC",  open_dom: false, dom: 2, disty: 2, sharp_disty: true,  disty_dist_limit: 3, fractional: true },
+            "f:err:ic" | "f-err-ic" | "ferric"    => Param { name: "F:ERR:IC",  open_dom: false, dom: 3, disty: 3, sharp_disty: false, disty_dist_limit: 3, fractional: true },
 
             _ => return Err(format!("unknown param type: '{}'", s)),
         })
@@ -277,10 +277,13 @@ fn test_graph(graph: &Graph, param: &Param, exhaustive: bool, log: bool) -> Vec<
 
     let zero = Real::from_real(&context, 0, 1);
     let one = Real::from_real(&context, 1, 1);
-    for v in verts.iter() {
+    for (i, v) in verts.iter().enumerate() {
         match param.fractional {
             true => s.assert(&(v.ge(&zero) & v.le(&one))),
-            false => s.assert(&(v._eq(&zero) | v._eq(&one))),
+            false => {
+                let flag = Bool::new_const(&context, format!("v{i}f")); // vastly faster than (v == 0 || v == 1)
+                s.assert(&v._eq(&flag.ite(&one, &zero)));
+            }
         }
     }
 
@@ -349,9 +352,9 @@ fn test_graph(graph: &Graph, param: &Param, exhaustive: bool, log: bool) -> Vec<
     if log {
         match solutions.first() {
             Some(solution) => match exhaustive {
-                false => println!("\nfound a minimum solution of size {}", solution.len()),
+                false => println!("\nfound a minimum solution of size {}", solution.iter().map(|(_, (p, q))| *p as f64 / *q as f64).sum::<f64>()),
                 true => {
-                    println!("\nexhausted all {} minimum solutions of size {}\n", solutions.len(), solution.len());
+                    println!("\nexhausted all {} minimum solutions of size {}\n", solutions.len(), solution.iter().map(|(_, (p, q))| *p as f64 / *q as f64).sum::<f64>());
 
                     let mut always_detectors = vec![true; n];
                     let mut never_detectors = vec![true; n];
