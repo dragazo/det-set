@@ -9,4 +9,5 @@ edition = "2021"
 itertools = "0.10.3"
 clap = { version = "3.2.1", features = ["derive"] }
 numeric-sort = "0.1.0"
+num-rational = "0.4.1"
 z3 = "0.11.2"

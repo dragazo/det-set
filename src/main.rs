@@ -2,10 +2,10 @@ use std::collections::{BTreeSet, BTreeMap};
 use std::str::FromStr;
 use std::num::NonZeroUsize;
 use std::io::{self, BufRead, BufReader};
+use std::fmt::{self, Write};
 use std::cmp::Ordering;
 use std::fs::File;
-use std::{iter, fmt};
-use std::fmt::Write;
+use std::iter;
 
 use itertools::Itertools;
 use clap::Parser;
@@ -13,12 +13,22 @@ use clap::Parser;
 use z3::{Context, Optimize, SatResult};
 use z3::ast::{Bool, Real, Int, Ast};
 
+use num_rational::Rational64;
+
 type Adj<'a, P> = dyn 'a + Fn(P) -> BTreeSet<P>;
 type Counter<'ctx, P> = dyn 'ctx + Fn(&BTreeSet<P>) -> Real<'ctx>;
 
 trait Point: Copy + Ord {}
 impl Point for (i32, i32) {}
 impl Point for usize {}
+
+struct Verbose<'a>(&'a Rational64);
+impl fmt::Display for Verbose<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let (p, q) = (*self.0.numer(), *self.0.denom());
+        write!(f, "{}/{} = {}", p, q, p as f64 / q as f64)
+    }
+}
 
 fn adj_k(p: (i32, i32)) -> BTreeSet<(i32, i32)> {
     [
@@ -71,14 +81,14 @@ fn test_get_size() {
         }
     }
 }
-fn print_shape(shape: &BTreeSet<(i32, i32)>, detectors: &BTreeMap<(i32, i32), (i64, i64)>) {
+fn print_shape(shape: &BTreeSet<(i32, i32)>, detectors: &BTreeMap<(i32, i32), Rational64>) {
     let (rows, cols) = get_size(shape);
     let mut table = vec![vec![String::new(); cols]; rows];
 
     for (r, c) in shape.iter().copied() {
         table[r as usize][c as usize] = match detectors.get(&(r, c)).copied() {
-            Some((p, q)) => if p == q { '1'.into() } else if p == 0 { '0'.into() } else { format!("({p}/{q})") },
-            None => ' '.into(),
+            Some(v) => if *v.numer() == *v.denom() { '1'.into() } else if *v.numer() == 0 { '0'.into() } else { format!("({v})") },
+            None => '.'.into(),
         };
     }
 
@@ -270,21 +280,7 @@ impl FromStr for Param {
     }
 }
 
-fn gcd(mut a: usize, mut b: usize) -> usize {
-    while b != 0 {
-        (a, b) = (b, a % b);
-    }
-    a
-}
-#[test]
-fn test_gcd() {
-    assert_eq!(gcd(6, 16), 2); assert_eq!(gcd(16, 6), 2);
-    assert_eq!(gcd(8, 16), 8); assert_eq!(gcd(16, 8), 8);
-    assert_eq!(gcd(64, 16), 16); assert_eq!(gcd(16, 64), 16);
-    assert_eq!(gcd(1071, 462), 21); assert_eq!(gcd(462, 1071), 21);
-}
-
-fn test_graph(graph: &Graph, param: &Param, exhaustive: bool, log: bool) -> Vec<BTreeMap<usize, (i64, i64)>> {
+fn test_graph(graph: &Graph, param: &Param, exhaustive: bool, log: bool) -> Vec<BTreeMap<usize, Rational64>> {
     let n = graph.verts.len();
     let adj = |p: usize| graph.verts[p].1.iter().copied().collect();
     let distances = Distances::within_shape(&(0..n).collect(), &adj);
@@ -324,37 +320,45 @@ fn test_graph(graph: &Graph, param: &Param, exhaustive: bool, log: bool) -> Vec<
         }
     }
 
-    fn solution_string<I: Iterator<Item = (usize, (i64, i64))>>(graph: &Graph, verts: I) -> String {
+    fn solution_string<I: Iterator<Item = (usize, Rational64)>>(graph: &Graph, verts: I) -> String {
         let mut names: Vec<_> = verts.map(|v| (graph.verts[v.0].0.as_str(), v.1)).collect();
         names.sort_by(|a, b| numeric_sort::cmp(a.0, b.0));
         let mut res = String::new();
         res.push('{');
-        for (name, (p, q)) in names {
-            res.push(' ');
-            res.push_str(name);
-            if p != q {
-                write!(res, "({p}/{q})").unwrap();
+        for (name, v) in names {
+            if *v.numer() != 0 {
+                res.push(' ');
+                res.push_str(name);
+                if *v.numer() != *v.denom() {
+                    write!(res, "({v})").unwrap();
+                }
             }
         }
         res.push_str(" }");
         res
     }
 
-    let mut solutions: Vec<BTreeMap<usize, (i64, i64)>> = vec![];
+    let mut solutions: Vec<BTreeMap<usize, Rational64>> = vec![];
+    let mut minimum_value = None;
     loop {
         match s.check(&[]) {
             SatResult::Sat => {
                 let model = s.get_model().unwrap();
-                let detectors: BTreeMap<usize, (i64, i64)> = verts.iter().enumerate().map(|(i, v)| (i, model.eval(v, false).unwrap().as_real().unwrap())).filter(|(_, (num, _))| *num != 0).collect();
+                let detectors: BTreeMap<usize, Rational64> = verts.iter().map(|v| model.eval(v, false).unwrap().as_real().unwrap()).map(|(p, q)| Rational64::new(p, q)).enumerate().collect();
+                let value = detectors.iter().map(|x| x.1).sum::<Rational64>();
 
-                let prev_size = solutions.first().map(|s| s.len()).unwrap_or(detectors.len());
-                assert!(prev_size <= detectors.len());
-                if prev_size < detectors.len() { break }
+                match &minimum_value {
+                    None => minimum_value = Some(value),
+                    Some(min) => {
+                        assert!(*min <= value);
+                        if *min < value { break }
+                    }
+                }
 
                 let mut different_answer = Bool::from_bool(&context, false);
                 for (i, v) in verts.iter().enumerate() {
-                    let (p, q) = detectors.get(&i).copied().unwrap_or((0, 1));
-                    different_answer |= v._eq(&Real::from_real(&context, p as i32, q as i32)).not();
+                    let value = detectors.get(&i).copied().unwrap();
+                    different_answer |= v._eq(&Real::from_real(&context, *value.numer() as i32, *value.denom() as i32)).not();
                 }
                 s.assert(&different_answer);
 
@@ -371,11 +375,11 @@ fn test_graph(graph: &Graph, param: &Param, exhaustive: bool, log: bool) -> Vec<
     }
 
     if log {
-        match solutions.first() {
-            Some(solution) => match exhaustive {
-                false => println!("\nfound a minimum solution of size {}", solution.iter().map(|(_, (p, q))| *p as f64 / *q as f64).sum::<f64>()),
+        match &minimum_value {
+            Some(value) => match exhaustive {
+                false => println!("\nfound a minimum solution of size {}", Verbose(value)),
                 true => {
-                    println!("\nexhausted all {} minimum solutions of size {}\n", solutions.len(), solution.iter().map(|(_, (p, q))| *p as f64 / *q as f64).sum::<f64>());
+                    println!("\nexhausted all {} minimum solutions of size {}\n", solutions.len(), Verbose(value));
 
                     let mut always_detectors = vec![true; n];
                     let mut never_detectors = vec![true; n];
@@ -388,9 +392,9 @@ fn test_graph(graph: &Graph, param: &Param, exhaustive: bool, log: bool) -> Vec<
                     }
                     let sometimes_detectors: Vec<_> = iter::zip(&always_detectors, &never_detectors).map(|(a, b)| !a && !b).collect();
 
-                    println!("always    detectors: {}", solution_string(graph,    always_detectors.iter().enumerate().filter(|x| *x.1).map(|x| (x.0, (1, 1)))));
-                    println!("never     detectors: {}", solution_string(graph,     never_detectors.iter().enumerate().filter(|x| *x.1).map(|x| (x.0, (1, 1)))));
-                    println!("sometimes detectors: {}", solution_string(graph, sometimes_detectors.iter().enumerate().filter(|x| *x.1).map(|x| (x.0, (1, 1)))));
+                    println!("always    detectors: {}", solution_string(graph,    always_detectors.iter().enumerate().filter(|x| *x.1).map(|x| (x.0, Rational64::new(1, 1)))));
+                    println!("never     detectors: {}", solution_string(graph,     never_detectors.iter().enumerate().filter(|x| *x.1).map(|x| (x.0, Rational64::new(1, 1)))));
+                    println!("sometimes detectors: {}", solution_string(graph, sometimes_detectors.iter().enumerate().filter(|x| *x.1).map(|x| (x.0, Rational64::new(1, 1)))));
                 }
             }
             None => println!("no solution"),
@@ -399,7 +403,7 @@ fn test_graph(graph: &Graph, param: &Param, exhaustive: bool, log: bool) -> Vec<
 
     solutions
 }
-fn test_tiling(shape: &BTreeSet<(i32, i32)>, grid: &Grid, param: &Param, log: bool) -> Option<(BTreeMap<(i32, i32), (i64, i64)>, (i32, i32), (i32, i32), usize)> {
+fn test_tiling(shape: &BTreeSet<(i32, i32)>, grid: &Grid, param: &Param, log: bool) -> Option<(BTreeMap<(i32, i32), Rational64>, (i32, i32), (i32, i32), usize)> {
     if log {
         println!("tile shape:");
         print_shape(&shape, &Default::default());
@@ -424,10 +428,13 @@ fn test_tiling(shape: &BTreeSet<(i32, i32)>, grid: &Grid, param: &Param, log: bo
 
     let zero = Real::from_real(&context, 0, 1);
     let one = Real::from_real(&context, 1, 1);
-    for (_, v) in verts.iter() {
+    for (p, v) in verts.iter() {
         match param.fractional {
             true => s.assert(&(v.ge(&zero) & v.le(&one))),
-            false => s.assert(&(v._eq(&zero) | v._eq(&one))),
+            false => {
+                let flag = Bool::new_const(&context, format!("v{},{}f", p.0, p.1)); // vastly faster than (v == 0 || v == 1)
+                s.assert(&v._eq(&flag.ite(&one, &zero)));
+            }
         }
     }
 
@@ -471,7 +478,6 @@ fn test_tiling(shape: &BTreeSet<(i32, i32)>, grid: &Grid, param: &Param, log: bo
         any_solution |= solution;
     }
     s.assert(&any_solution);
-    s.assert(verts.iter().next().unwrap().1); // arbitrarily place the first detector at some vertex
 
     if log {
         println!("checking {} tilings...\n", tilings.len());
@@ -480,7 +486,7 @@ fn test_tiling(shape: &BTreeSet<(i32, i32)>, grid: &Grid, param: &Param, log: bo
     match s.check(&[]) {
         SatResult::Sat => {
             let model = s.get_model().unwrap();
-            let detectors = verts.iter().map(|(p, v)| (*p, model.eval(v, false).unwrap().as_real().unwrap())).filter(|(_, (num, _))| *num != 0).collect();
+            let detectors = verts.iter().map(|(p, v)| (*p, model.eval(v, false).unwrap().as_real().unwrap())).map(|(p, v)| (p, Rational64::new(v.0, v.1))).collect();
             let tidx = model.eval(&tiling_index, false).unwrap().as_u64().unwrap() as usize;
             Some((detectors, tilings[tidx].1, tilings[tidx].2, tidx))
         }
@@ -488,14 +494,14 @@ fn test_tiling(shape: &BTreeSet<(i32, i32)>, grid: &Grid, param: &Param, log: bo
         SatResult::Unknown => unreachable!(),
     }
 }
-fn print_result(shape: &BTreeSet<(i32, i32)>, res: &Option<(BTreeMap<(i32, i32), (i64, i64)>, (i32, i32), (i32, i32), usize)>) {
+fn print_result(shape: &BTreeSet<(i32, i32)>, res: &Option<(BTreeMap<(i32, i32), Rational64>, (i32, i32), (i32, i32), usize)>) {
     match res {
         Some((detectors, b1, b2, tidx)) => {
             println!("found minimum:");
             print_shape(&shape, detectors);
-            let m = gcd(detectors.len(), shape.len());
-            let (n, d) = (detectors.len() / m, shape.len() / m);
-            println!("\n{}/{} = {}", n, d, n as f64 / d as f64);
+            let total = detectors.iter().map(|x| x.1).sum::<Rational64>();
+            let value = total / Rational64::new(shape.len() as i64, 1);
+            println!("\n{}", Verbose(&value));
             println!("basis: {:?} {:?} (tiling index {})", b1, b2, tidx);
         }
         None => println!("no solution"),
