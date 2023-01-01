@@ -185,6 +185,15 @@ fn sum<'ctx, 'a, I>(context: &'ctx Context, iter: I) -> Real<'ctx> where 'ctx: '
     }
     res
 }
+fn count<'ctx, 'a, I>(context: &'ctx Context, iter: I) -> Int<'ctx> where 'ctx: 'a, I: Iterator<Item = Bool<'ctx>> {
+    let zero = Int::from_u64(context, 0);
+    let one = Int::from_u64(context, 1);
+    let mut res = one.clone();
+    for v in iter {
+        res += v.ite(&one, &zero);
+    }
+    res
+}
 
 struct Grid {
     name: &'static str,
@@ -288,12 +297,15 @@ fn test_graph(graph: &Graph, param: &Param, exhaustive: bool, log: bool) -> Vec<
     let context = Context::new(&Default::default());
     let verts: Vec<Real> = (0..n).map(|p| Real::new_const(&context, format!("v{p}"))).collect();
 
-    let s = Optimize::new(&context);
-    let detector_count = sum(&context, verts.iter());
-    s.minimize(&detector_count);
-
     let zero = Real::from_real(&context, 0, 1);
     let one = Real::from_real(&context, 1, 1);
+
+    let s = Optimize::new(&context);
+    s.minimize(&sum(&context, verts.iter()));
+    if param.fractional {
+        s.minimize(&count(&context, verts.iter().map(|x| x.gt(&zero))));
+    }
+
     for (i, v) in verts.iter().enumerate() {
         match param.fractional {
             true => s.assert(&(v.ge(&zero) & v.le(&one))),
@@ -422,12 +434,15 @@ fn test_tiling(shape: &BTreeSet<(i32, i32)>, grid: &Grid, param: &Param, log: bo
     let verts: BTreeMap<(i32, i32), Real> = shape.iter().copied().map(|p| (p, Real::new_const(&context, format!("v{},{}", p.0, p.1)))).collect();
     let tiling_index = Int::new_const(&context, "tidx");
 
-    let s = Optimize::new(&context);
-    let detector_count = sum(&context, verts.values());
-    s.minimize(&detector_count);
-
     let zero = Real::from_real(&context, 0, 1);
     let one = Real::from_real(&context, 1, 1);
+
+    let s = Optimize::new(&context);
+    s.minimize(&sum(&context, verts.values()));
+    if param.fractional {
+        s.minimize(&count(&context, verts.values().map(|x| x.gt(&zero))));
+    }
+
     for (p, v) in verts.iter() {
         match param.fractional {
             true => s.assert(&(v.ge(&zero) & v.le(&one))),
