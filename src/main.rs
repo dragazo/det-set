@@ -405,7 +405,7 @@ fn test_graph(graph: &Graph, param: &Param, exhaustive: bool, log: bool) -> Vec<
                     let mut never_detectors = vec![true; n];
                     for solution in solutions.iter() {
                         for i in 0..n {
-                            let is_detector = solution.contains_key(&i);
+                            let is_detector = *solution.get(&i).unwrap().numer() != 0;
                             if is_detector { never_detectors[i] = false; }
                             else { always_detectors[i] = false; }
                         }
@@ -541,9 +541,9 @@ enum GraphParseError {
 }
 impl From<io::Error> for GraphParseError { fn from(error: io::Error) -> Self { Self::IO { error } } }
 
-#[derive(Default, Debug)]
+#[derive(Default, Debug, Clone)]
 struct Graph {
-    verts: Vec<(String, Vec<usize>)>,
+    verts: Vec<(String, BTreeSet<usize>)>,
 }
 impl Graph {
     fn read(src: &mut dyn BufRead) -> Result<Graph, GraphParseError> {
@@ -573,26 +573,28 @@ impl Graph {
             }
         }
 
-        Ok(Graph { verts: verts.into_iter().map(|(name, adj)| (name, adj.into_iter().collect())).collect() })
+        Ok(Graph { verts })
     }
     fn by_adj<T, N, A>(points: &[T], namer: N, is_adj: A) -> Self where N: Fn(&T) -> String, A: Fn(&T, &T) -> bool {
         let mut verts = Vec::with_capacity(points.len());
         for (i, v) in points.iter().enumerate() {
-            let mut v_adj = vec![];
+            let mut v_adj = BTreeSet::new();
             for (j, u) in points.iter().enumerate() {
                 if i == j { continue }
                 let adj = is_adj(v, u);
                 debug_assert_eq!(adj, is_adj(u, v));
-                if adj { v_adj.push(j); }
+                if adj { v_adj.insert(j); }
             }
             verts.push((namer(v), v_adj));
         }
         Self { verts }
     }
-    fn hypercube(dims: usize) -> Self {
-        assert!(dims <= 30); // anything this big is unrealistic anyway
-        let verts: Vec<usize> = (0..(1 << dims)).collect();
-        Self::by_adj(&verts, |&x| format!("{x:b}"), |&a, &b| (a ^ b).is_power_of_two())
+    fn cartesian_product(&self, other: &Self) -> Self {
+        Self::by_adj(
+            &self.verts.iter().enumerate().cartesian_product(other.verts.iter().enumerate()).collect::<Vec<_>>(),
+            |x| format!("{},{}", x.0.1.0, x.1.1.0),
+            |x, y| (x.0.0 == y.0.0 && other.verts[x.1.0].1.contains(&y.1.0)) || (x.1.0 == y.1.0 && self.verts[x.0.0].1.contains(&y.0.0))
+        )
     }
 }
 impl fmt::Display for Graph {
@@ -651,22 +653,37 @@ fn main() {
             print_result(&shape, &test_tiling(&shape, &grid, &param, true))
         }
         Mode::Finite { src, param, all } => {
-            let graph = match src.as_str() {
-                "-" => Graph::read(&mut BufReader::new(io::stdin())).unwrap(),
-                x => {
-                    let special = {
-                        if !x.is_empty() && x.chars().next().unwrap().to_ascii_uppercase() == 'Q' {
-                            if let Ok(n) = x[1..].parse() { Some(Graph::hypercube(n)) } else { None }
+            let mut graph: Option<Graph> = None;
+            let mut stdin_graph = None;
+            for src in src.split('*') {
+                let lower = src.to_ascii_lowercase();
+                let g2 = {
+                    if lower == "-" {
+                        if stdin_graph.is_none() {
+                            stdin_graph = Some(Graph::read(&mut BufReader::new(io::stdin())).expect("failed to read graph from stdin"));
+                        }
+                        Some(stdin_graph.as_ref().unwrap().clone())
+                    } else if lower.starts_with('p') {
+                        if let Ok(n) = lower[1..].parse::<usize>() {
+                            Some(Graph::by_adj(&(0..n).collect::<Vec<_>>(), |&x| format!("{x}"), |&x, &y| x.abs_diff(y) == 1))
                         } else {
                             None
                         }
-                    };
-                    match special {
-                        Some(x) => x,
-                        None => Graph::read(&mut BufReader::new(File::open(x).unwrap())).unwrap(),
+                    } else if lower.starts_with('c') {
+                        if let Ok(n) = lower[1..].parse::<usize>() {
+                            Some(Graph::by_adj(&(0..n).collect::<Vec<_>>(), |&x| format!("{x}"), |&x, &y| x.abs_diff(y) == 1 || x.abs_diff(y) == n - 1))
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
                     }
-                }
-            };
+                };
+                let g2 = g2.unwrap_or_else(|| Graph::read(&mut BufReader::new(File::open(src).unwrap())).expect("failed to read graph from file"));
+
+                graph = Some(if let Some(g1) = graph { g1.cartesian_product(&g2) } else { g2 });
+            }
+            let graph = graph.unwrap();
 
             println!("checking {}\nG = {}\nn = {}\ne = {}\n", param.name, graph, graph.verts.len(), graph.verts.iter().map(|x| x.1.len()).sum::<usize>() / 2);
             test_graph(&graph, &param, all, true);
