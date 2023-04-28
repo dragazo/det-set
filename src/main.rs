@@ -175,9 +175,6 @@ fn get_tilings(shape: &BTreeSet<(i32, i32)>) -> Vec<(BTreeMap<(i32, i32), (i32, 
     tilings.into_iter().map(|(tiling, (b1, b2))| (tiling, b1, b2)).collect()
 }
 
-fn max<'ctx>(a: &Real<'ctx>, b: &Real<'ctx>) -> Real<'ctx> {
-    a.ge(b).ite(a, b)
-}
 fn sum<'ctx, 'a, I>(context: &'ctx Context, iter: I) -> Real<'ctx> where 'ctx: 'a, I: Iterator<Item = &'a Real<'ctx>> {
     let mut res = Real::from_real(context, 0, 1);
     for v in iter {
@@ -212,124 +209,124 @@ impl FromStr for Grid {
     }
 }
 
-struct Param {
+enum DomKind {
+    Open,
+    Closed,
+}
+
+enum DistyKind {
+    Symmetric, // |(A cup B) - (A cap B)| >= k
+    Sharp,     // |A - B| >= k or |B - A| >= k
+    BiSharp,   // |A - B| >= k and |B - A| >= k
+}
+
+struct BasicParam {
     name: &'static str,
-    open_dom: bool,
+    dom_kind: DomKind,
+    disty_kind: DistyKind,
     dom: usize,
     disty: usize,
-    disty_sharp: bool,
-    disty_add_self: bool,
-    disty_dist_limit: usize,
+    add_self: bool,
+}
+struct Param {
+    basic: BasicParam,
     fractional: bool,
     efficient: bool,
 }
 impl Param {
+    fn get_name(&self) -> String {
+        let mut res = String::with_capacity(self.basic.name.len() + 3);
+        if self.efficient { res.push('E'); }
+        if self.fractional { res.push('F'); }
+        if !res.is_empty() { res.push(':'); }
+        res.push_str(self.basic.name);
+        res
+    }
     fn dom_region<P: Point>(&self, p: P, adj: &Adj<P>) -> BTreeSet<P> {
         let mut res = adj(p);
-        if !self.open_dom { assert!(res.insert(p)); }
-        else { assert!(!res.contains(&p)); }
+        match self.basic.dom_kind {
+            DomKind::Open => assert!(!res.contains(&p)),
+            DomKind::Closed => assert!(res.insert(p)),
+        }
         res
     }
     fn check_dom<'ctx, P: Point>(&self, context: &'ctx Context, p: (P, &Real<'ctx>), adj: &Adj<P>, counter: &Counter<'ctx, P>) -> Option<Bool<'ctx>> {
-        if self.dom == 0 { return None }
-        let value = counter(&self.dom_region(p.0, adj));
-        let min = Real::from_real(context, self.dom as i32, 1);
-        Some(if self.efficient { value._eq(&min) } else { value.ge(&min) })
+        if self.basic.dom == 0 { return None }
+        let mut r = self.dom_region(p.0, adj);
+        if self.basic.add_self {
+            r.insert(p.0);
+        }
+        let value = counter(&r);
+        let req = Real::from_real(context, self.basic.dom as i32, 1);
+        Some(if self.efficient { value._eq(&req) } else { value.ge(&req) })
     }
     fn check_disty<'ctx, P: Point>(&self, context: &'ctx Context, p: (P, &Real<'ctx>), q: (P, &Real<'ctx>), adj: &Adj<P>, distances: &Distances<P>, counter: &Counter<'ctx, P>) -> Option<Bool<'ctx>> {
-        if self.disty == 0 || distances.get(p.0, q.0) >= self.disty_dist_limit { return None }
+        if self.basic.disty == 0 || distances.get(p.0, q.0) >= 3 { return None }
         let regions = (self.dom_region(p.0, adj), self.dom_region(q.0, adj));
-        let disty = match self.disty_sharp {
-            false => {
-                let mut r: BTreeSet<P> = regions.0.symmetric_difference(&regions.1).copied().collect();
-                if self.disty_add_self {
-                    r.insert(p.0);
-                    r.insert(q.0);
-                }
-                counter(&r)
-            }
-            true => {
-                let mut r1: BTreeSet<P> = &regions.0 - &regions.1;
-                let mut r2: BTreeSet<P> = &regions.1 - &regions.0;
-                if self.disty_add_self {
-                    r1.insert(p.0);
-                    r1.insert(q.0);
+        let req = Real::from_real(context, self.basic.disty as i32, 1);
+        let mut r1: BTreeSet<P> = &regions.0 - &regions.1;
+        let mut r2: BTreeSet<P> = &regions.1 - &regions.0;
+        if self.basic.add_self {
+            r1.insert(p.0);
+            r1.insert(q.0);
 
-                    r2.insert(p.0);
-                    r2.insert(q.0);
-                }
-                max(&counter(&r1), &counter(&r2))
-            }
-        };
-        Some(disty.ge(&Real::from_real(context, self.disty as i32, 1)))
+            r2.insert(p.0);
+            r2.insert(q.0);
+        }
+        Some(match self.basic.disty_kind {
+            DistyKind::Symmetric => counter(&r1.union(&r2).copied().collect()).ge(&req),
+            DistyKind::Sharp => counter(&r1).ge(&req) | counter(&r2).ge(&req),
+            DistyKind::BiSharp => counter(&r1).ge(&req) & counter(&r2).ge(&req),
+        })
     }
 }
 impl FromStr for Param {
     type Err = String;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        Ok(match s.trim().to_lowercase().as_str() {
-            "odom"                           => Param { name: "ODOM",    open_dom: true,  dom: 1, disty: 0, disty_sharp: false, disty_add_self: false, disty_dist_limit: 3, fractional: false, efficient: false },
-            "old"                            => Param { name: "OLD",     open_dom: true,  dom: 1, disty: 1, disty_sharp: false, disty_add_self: false, disty_dist_limit: 3, fractional: false, efficient: false },
-            "red:old" | "red-old" | "redold" => Param { name: "RED:OLD", open_dom: true,  dom: 2, disty: 2, disty_sharp: false, disty_add_self: false, disty_dist_limit: 3, fractional: false, efficient: false },
-            "det:old" | "det-old" | "detold" => Param { name: "DET:OLD", open_dom: true,  dom: 2, disty: 2, disty_sharp: true,  disty_add_self: false, disty_dist_limit: 3, fractional: false, efficient: false },
-            "err:old" | "err-old" | "errold" => Param { name: "ERR:OLD", open_dom: true,  dom: 3, disty: 3, disty_sharp: false, disty_add_self: false, disty_dist_limit: 3, fractional: false, efficient: false },
-            "dom"                            => Param { name: "DOM",     open_dom: false, dom: 1, disty: 0, disty_sharp: false, disty_add_self: false, disty_dist_limit: 3, fractional: false, efficient: false },
-            "ic"                             => Param { name: "IC",      open_dom: false, dom: 1, disty: 1, disty_sharp: false, disty_add_self: false, disty_dist_limit: 3, fractional: false, efficient: false },
-            "red:ic"  | "red-ic"  | "redic"  => Param { name: "RED:IC",  open_dom: false, dom: 2, disty: 2, disty_sharp: false, disty_add_self: false, disty_dist_limit: 3, fractional: false, efficient: false },
-            "det:ic"  | "det-ic"  | "detic"  => Param { name: "DET:IC",  open_dom: false, dom: 2, disty: 2, disty_sharp: true,  disty_add_self: false, disty_dist_limit: 3, fractional: false, efficient: false },
-            "err:ic"  | "err-ic"  | "erric"  => Param { name: "ERR:IC",  open_dom: false, dom: 3, disty: 3, disty_sharp: false, disty_add_self: false, disty_dist_limit: 3, fractional: false, efficient: false },
-            "ld"                             => Param { name: "LD",      open_dom: false, dom: 1, disty: 1, disty_sharp: false, disty_add_self: true,  disty_dist_limit: 3, fractional: false, efficient: false },
-            "red:ld"  | "red-ld"  | "redld"  => Param { name: "RED:LD",  open_dom: false, dom: 2, disty: 2, disty_sharp: false, disty_add_self: true,  disty_dist_limit: 3, fractional: false, efficient: false },
-            "det:ld"  | "det-ld"  | "detld"  => Param { name: "DET:LD",  open_dom: false, dom: 2, disty: 2, disty_sharp: true,  disty_add_self: true,  disty_dist_limit: 3, fractional: false, efficient: false },
-            "err:ld"  | "err-ld"  | "errld"  => Param { name: "ERR:LD",  open_dom: false, dom: 3, disty: 3, disty_sharp: false, disty_add_self: true,  disty_dist_limit: 3, fractional: false, efficient: false },
+        fn parse_basic(s: &str) -> Option<BasicParam> {
+            Some(match s.trim().to_lowercase().as_str() {
+                "odom"                           => BasicParam { name: "ODOM",    dom_kind: DomKind::Open,   disty_kind: DistyKind::Symmetric, dom: 1, disty: 0, add_self: false },
+                "old"                            => BasicParam { name: "OLD",     dom_kind: DomKind::Open,   disty_kind: DistyKind::Symmetric, dom: 1, disty: 1, add_self: false },
+                "red:old" | "red-old" | "redold" => BasicParam { name: "RED:OLD", dom_kind: DomKind::Open,   disty_kind: DistyKind::Symmetric, dom: 2, disty: 2, add_self: false },
+                "det:old" | "det-old" | "detold" => BasicParam { name: "DET:OLD", dom_kind: DomKind::Open,   disty_kind: DistyKind::Sharp,     dom: 2, disty: 2, add_self: false },
+                "err:old" | "err-old" | "errold" => BasicParam { name: "ERR:OLD", dom_kind: DomKind::Open,   disty_kind: DistyKind::Symmetric, dom: 3, disty: 3, add_self: false },
+                "dom"                            => BasicParam { name: "DOM",     dom_kind: DomKind::Closed, disty_kind: DistyKind::Symmetric, dom: 1, disty: 0, add_self: false },
+                "ic"                             => BasicParam { name: "IC",      dom_kind: DomKind::Closed, disty_kind: DistyKind::Symmetric, dom: 1, disty: 1, add_self: false },
+                "red:ic"  | "red-ic"  | "redic"  => BasicParam { name: "RED:IC",  dom_kind: DomKind::Closed, disty_kind: DistyKind::Symmetric, dom: 2, disty: 2, add_self: false },
+                "det:ic"  | "det-ic"  | "detic"  => BasicParam { name: "DET:IC",  dom_kind: DomKind::Closed, disty_kind: DistyKind::Sharp,     dom: 2, disty: 2, add_self: false },
+                "err:ic"  | "err-ic"  | "erric"  => BasicParam { name: "ERR:IC",  dom_kind: DomKind::Closed, disty_kind: DistyKind::Symmetric, dom: 3, disty: 3, add_self: false },
+                "ld"                             => BasicParam { name: "LD",      dom_kind: DomKind::Open,   disty_kind: DistyKind::Symmetric, dom: 1, disty: 1, add_self: true  },
+                "red:ld"  | "red-ld"  | "redld"  => BasicParam { name: "RED:LD",  dom_kind: DomKind::Open,   disty_kind: DistyKind::Symmetric, dom: 2, disty: 2, add_self: true  },
+                "det:ld"  | "det-ld"  | "detld"  => BasicParam { name: "DET:LD",  dom_kind: DomKind::Open,   disty_kind: DistyKind::Sharp,     dom: 2, disty: 2, add_self: true  },
+                "err:ld"  | "err-ld"  | "errld"  => BasicParam { name: "ERR:LD",  dom_kind: DomKind::Open,   disty_kind: DistyKind::Symmetric, dom: 3, disty: 3, add_self: true  },
+                _ => return None,
+            })
+        }
 
-            "f:odom"    | "f-odom"    | "fodom"   => Param { name: "F:ODOM",    open_dom: true,  dom: 1, disty: 0, disty_sharp: false, disty_add_self: false, disty_dist_limit: 3, fractional: true, efficient: false },
-            "f:old"     | "f-old"     | "fold"    => Param { name: "F:OLD",     open_dom: true,  dom: 1, disty: 1, disty_sharp: false, disty_add_self: false, disty_dist_limit: 3, fractional: true, efficient: false },
-            "f:red:old" | "f-red-old" | "fredold" => Param { name: "F:RED:OLD", open_dom: true,  dom: 2, disty: 2, disty_sharp: false, disty_add_self: false, disty_dist_limit: 3, fractional: true, efficient: false },
-            "f:det:old" | "f-det-old" | "fdetold" => Param { name: "F:DET:OLD", open_dom: true,  dom: 2, disty: 2, disty_sharp: true,  disty_add_self: false, disty_dist_limit: 3, fractional: true, efficient: false },
-            "f:err:old" | "f-err-old" | "ferrold" => Param { name: "F:ERR:OLD", open_dom: true,  dom: 3, disty: 3, disty_sharp: false, disty_add_self: false, disty_dist_limit: 3, fractional: true, efficient: false },
-            "f:dom"     | "f-dom"     | "fdom"    => Param { name: "F:DOM",     open_dom: false, dom: 1, disty: 0, disty_sharp: false, disty_add_self: false, disty_dist_limit: 3, fractional: true, efficient: false },
-            "f:ic"      | "f-ic"      | "fic"     => Param { name: "F:IC",      open_dom: false, dom: 1, disty: 1, disty_sharp: false, disty_add_self: false, disty_dist_limit: 3, fractional: true, efficient: false },
-            "f:red:ic"  | "f-red-ic"  | "fredic"  => Param { name: "F:RED:IC",  open_dom: false, dom: 2, disty: 2, disty_sharp: false, disty_add_self: false, disty_dist_limit: 3, fractional: true, efficient: false },
-            "f:det:ic"  | "f-det-ic"  | "fdetic"  => Param { name: "F:DET:IC",  open_dom: false, dom: 2, disty: 2, disty_sharp: true,  disty_add_self: false, disty_dist_limit: 3, fractional: true, efficient: false },
-            "f:err:ic"  | "f-err-ic"  | "ferric"  => Param { name: "F:ERR:IC",  open_dom: false, dom: 3, disty: 3, disty_sharp: false, disty_add_self: false, disty_dist_limit: 3, fractional: true, efficient: false },
-            "f:ld"      | "f-ld"      | "fld"     => Param { name: "F:LD",      open_dom: false, dom: 1, disty: 1, disty_sharp: false, disty_add_self: true,  disty_dist_limit: 3, fractional: true, efficient: false },
-            "f:red:ld"  | "f-red-ld"  | "fredld"  => Param { name: "F:RED:LD",  open_dom: false, dom: 2, disty: 2, disty_sharp: false, disty_add_self: true,  disty_dist_limit: 3, fractional: true, efficient: false },
-            "f:det:ld"  | "f-det-ld"  | "fdetld"  => Param { name: "F:DET:LD",  open_dom: false, dom: 2, disty: 2, disty_sharp: true,  disty_add_self: true,  disty_dist_limit: 3, fractional: true, efficient: false },
-            "f:err:ld"  | "f-err-ld"  | "ferrld"  => Param { name: "F:ERR:LD",  open_dom: false, dom: 3, disty: 3, disty_sharp: false, disty_add_self: true,  disty_dist_limit: 3, fractional: true, efficient: false },
+        let mut fractional = false;
+        let mut efficient = false;
+        let mut ss = s;
+        loop {
+            if let Some(basic) = parse_basic(ss) {
+                return Ok(Param { basic, fractional, efficient })
+            }
 
-            "e:odom"    | "e-odom"    | "eodom"   => Param { name: "E:ODOM",    open_dom: true,  dom: 1, disty: 0, disty_sharp: false, disty_add_self: false, disty_dist_limit: 3, fractional: false, efficient: true },
-            "e:old"     | "e-old"     | "eold"    => Param { name: "E:OLD",     open_dom: true,  dom: 1, disty: 1, disty_sharp: false, disty_add_self: false, disty_dist_limit: 3, fractional: false, efficient: true },
-            "e:red:old" | "e-red-old" | "eredold" => Param { name: "E:RED:OLD", open_dom: true,  dom: 2, disty: 2, disty_sharp: false, disty_add_self: false, disty_dist_limit: 3, fractional: false, efficient: true },
-            "e:det:old" | "e-det-old" | "edetold" => Param { name: "E:DET:OLD", open_dom: true,  dom: 2, disty: 2, disty_sharp: true,  disty_add_self: false, disty_dist_limit: 3, fractional: false, efficient: true },
-            "e:err:old" | "e-err-old" | "eerrold" => Param { name: "E:ERR:OLD", open_dom: true,  dom: 3, disty: 3, disty_sharp: false, disty_add_self: false, disty_dist_limit: 3, fractional: false, efficient: true },
-            "e:dom"     | "e-dom"     | "edom"    => Param { name: "E:DOM",     open_dom: false, dom: 1, disty: 0, disty_sharp: false, disty_add_self: false, disty_dist_limit: 3, fractional: false, efficient: true },
-            "e:ic"      | "e-ic"      | "eic"     => Param { name: "E:IC",      open_dom: false, dom: 1, disty: 1, disty_sharp: false, disty_add_self: false, disty_dist_limit: 3, fractional: false, efficient: true },
-            "e:red:ic"  | "e-red-ic"  | "eredic"  => Param { name: "E:RED:IC",  open_dom: false, dom: 2, disty: 2, disty_sharp: false, disty_add_self: false, disty_dist_limit: 3, fractional: false, efficient: true },
-            "e:det:ic"  | "e-det-ic"  | "edetic"  => Param { name: "E:DET:IC",  open_dom: false, dom: 2, disty: 2, disty_sharp: true,  disty_add_self: false, disty_dist_limit: 3, fractional: false, efficient: true },
-            "e:err:ic"  | "e-err-ic"  | "eerric"  => Param { name: "E:ERR:IC",  open_dom: false, dom: 3, disty: 3, disty_sharp: false, disty_add_self: false, disty_dist_limit: 3, fractional: false, efficient: true },
-            "e:ld"      | "e-ld"      | "eld"     => Param { name: "E:LD",      open_dom: false, dom: 1, disty: 1, disty_sharp: false, disty_add_self: true,  disty_dist_limit: 3, fractional: false, efficient: true },
-            "e:red:ld"  | "e-red-ld"  | "eredld"  => Param { name: "E:RED:LD",  open_dom: false, dom: 2, disty: 2, disty_sharp: false, disty_add_self: true,  disty_dist_limit: 3, fractional: false, efficient: true },
-            "e:det:ld"  | "e-det-ld"  | "edetld"  => Param { name: "E:DET:LD",  open_dom: false, dom: 2, disty: 2, disty_sharp: true,  disty_add_self: true,  disty_dist_limit: 3, fractional: false, efficient: true },
-            "e:err:ld"  | "e-err-ld"  | "eerrld"  => Param { name: "E:ERR:LD",  open_dom: false, dom: 3, disty: 3, disty_sharp: false, disty_add_self: true,  disty_dist_limit: 3, fractional: false, efficient: true },
+            let ch = ss.chars().next().unwrap_or('\0').to_ascii_lowercase();
+            if !fractional && ch == 'f' {
+                ss = &ss[1..];
+                fractional = true;
+            } else if !efficient && ch == 'e' {
+                ss = &ss[1..];
+                efficient = true;
+            } else {
+                return Err(format!("unknown param type: {s:?}"));
+            }
 
-            "ef:odom"    | "ef-odom"    | "efodom"   => Param { name: "EF:ODOM",    open_dom: true,  dom: 1, disty: 0, disty_sharp: false, disty_add_self: false, disty_dist_limit: 3, fractional: true, efficient: true },
-            "ef:old"     | "ef-old"     | "efold"    => Param { name: "EF:OLD",     open_dom: true,  dom: 1, disty: 1, disty_sharp: false, disty_add_self: false, disty_dist_limit: 3, fractional: true, efficient: true },
-            "ef:red:old" | "ef-red-old" | "efredold" => Param { name: "EF:RED:OLD", open_dom: true,  dom: 2, disty: 2, disty_sharp: false, disty_add_self: false, disty_dist_limit: 3, fractional: true, efficient: true },
-            "ef:det:old" | "ef-det-old" | "efdetold" => Param { name: "EF:DET:OLD", open_dom: true,  dom: 2, disty: 2, disty_sharp: true,  disty_add_self: false, disty_dist_limit: 3, fractional: true, efficient: true },
-            "ef:err:old" | "ef-err-old" | "eferrold" => Param { name: "EF:ERR:OLD", open_dom: true,  dom: 3, disty: 3, disty_sharp: false, disty_add_self: false, disty_dist_limit: 3, fractional: true, efficient: true },
-            "ef:dom"     | "ef-dom"     | "efdom"    => Param { name: "EF:DOM",     open_dom: false, dom: 1, disty: 0, disty_sharp: false, disty_add_self: false, disty_dist_limit: 3, fractional: true, efficient: true },
-            "ef:ic"      | "ef-ic"      | "efic"     => Param { name: "EF:IC",      open_dom: false, dom: 1, disty: 1, disty_sharp: false, disty_add_self: false, disty_dist_limit: 3, fractional: true, efficient: true },
-            "ef:red:ic"  | "ef-red-ic"  | "efredic"  => Param { name: "EF:RED:IC",  open_dom: false, dom: 2, disty: 2, disty_sharp: false, disty_add_self: false, disty_dist_limit: 3, fractional: true, efficient: true },
-            "ef:det:ic"  | "ef-det-ic"  | "efdetic"  => Param { name: "EF:DET:IC",  open_dom: false, dom: 2, disty: 2, disty_sharp: true,  disty_add_self: false, disty_dist_limit: 3, fractional: true, efficient: true },
-            "ef:err:ic"  | "ef-err-ic"  | "eferric"  => Param { name: "EF:ERR:IC",  open_dom: false, dom: 3, disty: 3, disty_sharp: false, disty_add_self: false, disty_dist_limit: 3, fractional: true, efficient: true },
-            "ef:ld"      | "ef-ld"      | "efld"     => Param { name: "EF:LD",      open_dom: false, dom: 1, disty: 1, disty_sharp: false, disty_add_self: true,  disty_dist_limit: 3, fractional: true, efficient: true },
-            "ef:red:ld"  | "ef-red-ld"  | "efredld"  => Param { name: "EF:RED:LD",  open_dom: false, dom: 2, disty: 2, disty_sharp: false, disty_add_self: true,  disty_dist_limit: 3, fractional: true, efficient: true },
-            "ef:det:ld"  | "ef-det-ld"  | "efdetld"  => Param { name: "EF:DET:LD",  open_dom: false, dom: 2, disty: 2, disty_sharp: true,  disty_add_self: true,  disty_dist_limit: 3, fractional: true, efficient: true },
-            "ef:err:ld"  | "ef-err-ld"  | "eferrld"  => Param { name: "EF:ERR:LD",  open_dom: false, dom: 3, disty: 3, disty_sharp: false, disty_add_self: true,  disty_dist_limit: 3, fractional: true, efficient: true },
-
-            _ => return Err(format!("unknown param type: '{}'", s)),
-        })
+            let br = ss.chars().next().unwrap_or('\0');
+            if br == ':' || br == '-' {
+                ss = &ss[1..];
+            }
+        }
     }
 }
 
@@ -685,7 +682,7 @@ fn main() {
     match Mode::parse() {
         Mode::Rect { rows, cols, grid, param } => {
             let shape = rect(rows.get(), cols.get());
-            println!("checking {} {}\n", param.name, grid.name);
+            println!("checking {} {}\n", param.get_name(), grid.name);
             print_result(&shape, &test_tiling(&shape, &grid, &param, true))
         }
         Mode::Finite { src, param, all } => {
@@ -721,7 +718,7 @@ fn main() {
             }
             let graph = graph.unwrap();
 
-            println!("checking {}\nG = {}\nn = {}\ne = {}\n", param.name, graph, graph.verts.len(), graph.verts.iter().map(|x| x.1.len()).sum::<usize>() / 2);
+            println!("checking {}\nG = {}\nn = {}\ne = {}\n", param.get_name(), graph, graph.verts.len(), graph.verts.iter().map(|x| x.1.len()).sum::<usize>() / 2);
             test_graph(&graph, &param, all, true);
         }
     }
