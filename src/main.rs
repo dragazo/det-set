@@ -418,7 +418,9 @@ fn test_graph(graph: &Graph, param: &Param, exhaustive: bool, log: bool) -> Vec<
                 s.assert(&different_answer);
 
                 if log {
-                    println!("solution {}: {}", solutions.len() + 1, solution_string(graph, detectors.iter().map(|x| (*x.0, *x.1))));
+                    let s = solution_string(graph, detectors.iter().map(|x| (*x.0, *x.1)));
+                    let s_bar = solution_string(graph, detectors.iter().filter(|x| *x.1.numer() == 0).map(|x| (*x.0, Rational64::new(1, 1))));
+                    println!("solution {}: S = {s}, !S = {s_bar}", solutions.len() + 1);
                 }
 
                 solutions.push(detectors);
