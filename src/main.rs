@@ -332,7 +332,24 @@ impl FromStr for Param {
     }
 }
 
-fn test_graph(graph: &Graph, param: &Param, exhaustive: bool, log: bool) -> Vec<BTreeMap<usize, Rational64>> {
+fn test_graph(graph: &Graph, param: &Param, exhaustive: bool, log: bool, omit_isomorphic: bool) -> Vec<BTreeMap<usize, Rational64>> {
+    let petgraph_graph: petgraph::Graph<usize, ()> = {
+        let mut g = petgraph::Graph::new();
+        let mut nodes = Vec::with_capacity(graph.verts.len());
+        for i in 0..graph.verts.len() {
+            nodes.push(g.add_node(i));
+        }
+        for (i, (_, adj)) in graph.verts.iter().enumerate() {
+            for other in adj.iter() {
+                g.add_edge(nodes[i], nodes[*other], ());
+            }
+        }
+        g
+    };
+    let is_isomorphic_solution = |s1: &BTreeMap<usize, Rational64>, s2: &BTreeMap<usize, Rational64>| {
+        petgraph::algo::is_isomorphic_matching(&petgraph_graph, &petgraph_graph, |u, v| s1.get(u).copied().unwrap_or_default() == s2.get(v).copied().unwrap_or_default(), |_, _| true)
+    };
+
     let n = graph.verts.len();
     let adj = |p: usize| graph.verts[p].1.iter().copied().collect();
     let distances = Distances::within_shape(&(0..n).collect(), &adj);
@@ -417,6 +434,10 @@ fn test_graph(graph: &Graph, param: &Param, exhaustive: bool, log: bool) -> Vec<
                 }
                 s.assert(&different_answer);
 
+                if omit_isomorphic && solutions.iter().any(|s1| is_isomorphic_solution(s1, &detectors)) {
+                    continue
+                }
+
                 if log {
                     let s = solution_string(graph, detectors.iter().map(|x| (*x.0, *x.1)));
                     let s_bar = solution_string(graph, detectors.iter().filter(|x| *x.1.numer() == 0).map(|x| (*x.0, Rational64::new(1, 1))));
@@ -424,7 +445,9 @@ fn test_graph(graph: &Graph, param: &Param, exhaustive: bool, log: bool) -> Vec<
                 }
 
                 solutions.push(detectors);
-                if !exhaustive { break }
+                if !exhaustive {
+                    break
+                }
             }
             SatResult::Unsat => break,
             SatResult::Unknown => unreachable!(),
@@ -436,7 +459,7 @@ fn test_graph(graph: &Graph, param: &Param, exhaustive: bool, log: bool) -> Vec<
             Some(value) => match exhaustive {
                 false => println!("\nfound a minimum solution of size {}", Verbose(value)),
                 true => {
-                    println!("\nexhausted all {} minimum solutions of size {}\n", solutions.len(), Verbose(value));
+                    println!("\nexhausted all {}{} minimum solutions of size {}\n", solutions.len(), if omit_isomorphic { " non-isomorphic" } else { "" }, Verbose(value));
 
                     let mut always_detectors = vec![true; n];
                     let mut never_detectors = vec![true; n];
@@ -676,9 +699,13 @@ enum Mode {
         /// The graph parameter to check; e.g., old, ic, red:old, red:ic, etc.
         param: Param,
 
-        /// Generate all minimum-valued solutions.
+        /// Exhaustively generate all minimum-valued solutions.
         #[clap(short, long)]
         all: bool,
+
+        /// Also output isomorphic/redundant solutions when running in exhaustive mode
+        #[clap(long)]
+        include_iso: bool,
     },
 }
 
@@ -689,7 +716,7 @@ fn main() {
             println!("checking {} {}\n", param.get_name(), grid.name);
             print_result(&shape, &test_tiling(&shape, &grid, &param, true))
         }
-        Mode::Finite { src, param, all } => {
+        Mode::Finite { src, param, all, include_iso } => {
             let mut graph: Option<Graph> = None;
             let mut stdin_graph = None;
             for src in src.split('*') {
@@ -723,7 +750,7 @@ fn main() {
             let graph = graph.unwrap();
 
             println!("checking {}\nG = {}\nn = {}\ne = {}\n", param.get_name(), graph, graph.verts.len(), graph.verts.iter().map(|x| x.1.len()).sum::<usize>() / 2);
-            test_graph(&graph, &param, all, true);
+            test_graph(&graph, &param, all, true, !include_iso);
         }
     }
 }
