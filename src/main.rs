@@ -456,10 +456,11 @@ fn test_graph(graph: &Graph, param: &Param, exhaustive: bool, log: bool, omit_is
 
     if log {
         match &minimum_value {
-            Some(value) => match exhaustive {
-                false => println!("\nfound a minimum solution of size {}", Verbose(value)),
-                true => {
-                    println!("\nexhausted all {}{} minimum solutions of size {}\n", solutions.len(), if omit_isomorphic { " non-isomorphic" } else { "" }, Verbose(value));
+            Some(value) => match (exhaustive, omit_isomorphic) {
+                (false, _) => println!("\nfound a minimum solution of size {}", Verbose(value)),
+                (true, true) => println!("\nexhausted all {} non-isomorphic minimum solutions of size {}", solutions.len(), Verbose(value)),
+                (true, false) => {
+                    println!("\nexhausted all {} minimum solutions of size {}\n", solutions.len(), Verbose(value));
 
                     let mut always_detectors = vec![true; n];
                     let mut never_detectors = vec![true; n];
