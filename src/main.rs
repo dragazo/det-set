@@ -294,6 +294,7 @@ impl FromStr for Param {
                 "ic"                             => BasicParam { name: "IC",      dom_kind: DomKind::Closed, disty_kind: DistyKind::Symmetric, dom: 1, disty: 1, add_self: false },
                 "red:ic"  | "red-ic"  | "redic"  => BasicParam { name: "RED:IC",  dom_kind: DomKind::Closed, disty_kind: DistyKind::Symmetric, dom: 2, disty: 2, add_self: false },
                 "det:ic"  | "det-ic"  | "detic"  => BasicParam { name: "DET:IC",  dom_kind: DomKind::Closed, disty_kind: DistyKind::Sharp,     dom: 2, disty: 2, add_self: false },
+                "rsp:ic"  | "rsp-ic"  | "rspic"  => BasicParam { name: "RSP:IC",  dom_kind: DomKind::Closed, disty_kind: DistyKind::Symmetric, dom: 2, disty: 3, add_self: false },
                 "err:ic"  | "err-ic"  | "erric"  => BasicParam { name: "ERR:IC",  dom_kind: DomKind::Closed, disty_kind: DistyKind::Symmetric, dom: 3, disty: 3, add_self: false },
                 "ld"                             => BasicParam { name: "LD",      dom_kind: DomKind::Open,   disty_kind: DistyKind::Symmetric, dom: 1, disty: 1, add_self: true  },
                 "red:ld"  | "red-ld"  | "redld"  => BasicParam { name: "RED:LD",  dom_kind: DomKind::Open,   disty_kind: DistyKind::Symmetric, dom: 2, disty: 2, add_self: true  },
