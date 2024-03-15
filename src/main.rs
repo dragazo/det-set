@@ -6,6 +6,9 @@ use std::fmt::{self, Write};
 use std::cmp::Ordering;
 use std::fs::File;
 use std::iter;
+use std::thread;
+use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicUsize, Ordering as MemOrder};
 
 use itertools::Itertools;
 use clap::Parser;
@@ -15,7 +18,7 @@ use z3::ast::{Bool, Real, Int, Ast};
 
 use num_rational::Rational64;
 
-type Adj<'a, P> = dyn 'a + Fn(P) -> BTreeSet<P>;
+type Adj<'a, P> = dyn 'a + Sync + Fn(P) -> BTreeSet<P>;
 type Counter<'ctx, P> = dyn 'ctx + Fn(&BTreeSet<P>) -> Real<'ctx>;
 
 trait Point: Copy + Ord {}
@@ -192,6 +195,7 @@ fn count<'ctx, 'a, I>(context: &'ctx Context, iter: I) -> Int<'ctx> where 'ctx: 
     res
 }
 
+#[derive(Clone, Copy)]
 struct Grid {
     name: &'static str,
     adj: &'static Adj<'static, (i32, i32)>,
@@ -209,17 +213,20 @@ impl FromStr for Grid {
     }
 }
 
+#[derive(Clone, Copy)]
 enum DomKind {
     Open,
     Closed,
 }
 
+#[derive(Clone, Copy)]
 enum DistyKind {
     Symmetric, // |(A - B) + (B - A)| >= k
     Sharp,     // |A - B| >= k or |B - A| >= k
     BiSharp,   // |A - B| >= k and |B - A| >= k
 }
 
+#[derive(Clone, Copy)]
 struct BasicParam {
     name: &'static str,
     dom_kind: DomKind,
@@ -228,6 +235,7 @@ struct BasicParam {
     disty: usize,
     add_self: bool,
 }
+#[derive(Clone, Copy)]
 struct Param {
     basic: BasicParam,
     fractional: bool,
@@ -498,6 +506,9 @@ fn test_tiling(shape: &BTreeSet<(i32, i32)>, grid: &Grid, param: &Param, log: bo
     if log {
         println!("\nfound {} tilings...", tilings.len());
     }
+    if tilings.is_empty() {
+        return None;
+    }
 
     let context = Context::new(&Default::default());
     let verts: BTreeMap<(i32, i32), Real> = shape.iter().copied().map(|p| (p, Real::new_const(&context, format!("v{},{}", p.0, p.1)))).collect();
@@ -692,6 +703,23 @@ enum Mode {
         /// The type of infinite grid; e.g., k, sq, tri, etc.
         grid: Grid,
     },
+    /// Minimum value for an unknown tiling on an infinite grid.
+    Entropy {
+        /// Number of rows in the bounding rectangle.
+        rows: NonZeroUsize,
+        /// Number of columns in the bounding rectangle.
+        cols: NonZeroUsize,
+        /// The size of the enclosed tile whose shape is unknown.
+        size: NonZeroUsize,
+        ///Tje graph parameter to check; e.g., old, ic, red:old, red:ic, etc.
+        param: Param,
+        /// The type of infinite grid; e.g., k, sq, tri, etc.
+        grid: Grid,
+
+        /// The number of threads to use for iterating geometries.
+        #[clap(short, long, default_value_t = NonZeroUsize::new(num_cpus::get()).unwrap())]
+        threads: NonZeroUsize,
+    },
     /// Minimum value for a finite graph.
     Finite {
         /// Path to a file containing the finite graph encoded as a sequence of whitespace-separated u:v edges.
@@ -716,6 +744,38 @@ fn main() {
             let shape = rect(rows.get(), cols.get());
             println!("checking {} {}\n", param.get_name(), grid.name);
             print_result(&shape, &test_tiling(&shape, &grid, &param, true))
+        }
+        Mode::Entropy { rows, cols, size, grid, param, threads } => {
+            let best_total = Arc::new(Mutex::new(None));
+            let shapes = Arc::new(Mutex::new((0..rows.get() as i32).cartesian_product(0..cols.get() as i32).combinations(size.get()).map(|x| x.into_iter().collect::<BTreeSet<_>>()).fuse()));
+            let shapes_total = Arc::new(AtomicUsize::new(0));
+
+            let threads = (0..threads.get()).map(|_| {
+                let best_total = best_total.clone();
+                let shapes = shapes.clone();
+                let shapes_total = shapes_total.clone();
+                thread::spawn(move || loop {
+                    let shape = match shapes.lock().unwrap().next() {
+                        Some(x) => x,
+                        None => break,
+                    };
+                    shapes_total.fetch_add(1, MemOrder::Relaxed);
+                    if let Some(res) = test_tiling(&shape, &grid, &param, false) {
+                        let total: Rational64 = res.0.values().sum();
+                        let mut best_total = best_total.lock().unwrap();
+                        if best_total.map(|x| total > x).unwrap_or(true) {
+                            *best_total = Some(total);
+                            println!("\nnew current best:");
+                            print_result(&shape, &Some(res));
+                        }
+                    }
+                })
+            }).collect::<Vec<_>>();
+            for thread in threads {
+                thread.join().unwrap();
+            }
+
+            println!("\ntested {} geometries", shapes_total.load(MemOrder::Relaxed));
         }
         Mode::Finite { src, param, all, include_iso } => {
             let mut graph: Option<Graph> = None;
