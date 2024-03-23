@@ -1,0 +1,77 @@
+use super::{NumericExpr, BoolExpr, GraphExpr, Rational64};
+
+grammar;
+
+pub BoolExpr: BoolExpr = {
+    #[precedence(level = "0")]
+    BoolTerm => <>,
+
+    #[precedence(level = "1")]
+    #[assoc(side = "left")]
+    <left:NumericExpr> "==" <right:NumericExpr> => BoolExpr::Eq { left: Box::new(left), right: Box::new(right) },
+    <left:NumericExpr> "!=" <right:NumericExpr> => BoolExpr::Neq { left: Box::new(left), right: Box::new(right) },
+    <left:NumericExpr> "<" <right:NumericExpr> => BoolExpr::Less { left: Box::new(left), right: Box::new(right) },
+    <left:NumericExpr> "<=" <right:NumericExpr> => BoolExpr::LessEq { left: Box::new(left), right: Box::new(right) },
+    <right:NumericExpr> ">" <left:NumericExpr> => BoolExpr::Less { left: Box::new(left), right: Box::new(right) },
+    <right:NumericExpr> ">=" <left:NumericExpr> => BoolExpr::LessEq { left: Box::new(left), right: Box::new(right) },
+
+    #[precedence(level = "1")]
+    "not" <BoolExpr> => BoolExpr::Not { value: Box::new(<>) },
+
+    #[precedence(level = "2")]
+    #[assoc(side = "left")]
+    <left:BoolExpr> "and" <right:BoolExpr> => BoolExpr::And { left: Box::new(left), right: Box::new(right) },
+
+    #[precedence(level = "3")]
+    #[assoc(side = "left")]
+    <left:BoolExpr> "xor" <right:BoolExpr> => BoolExpr::Xor { left: Box::new(left), right: Box::new(right) },
+
+    #[precedence(level = "4")]
+    #[assoc(side = "left")]
+    <left:BoolExpr> "or" <right:BoolExpr> => BoolExpr::Or { left: Box::new(left), right: Box::new(right) },
+};
+BoolTerm: BoolExpr = {
+    "true" => BoolExpr::Constant { value: true },
+    "false" => BoolExpr::Constant { value: false },
+    "(" <BoolExpr> ")" => <>,
+};
+
+NumericExpr: NumericExpr = {
+    #[precedence(level = "0")]
+    NumericTerm => <>,
+
+    #[precedence(level = "0")]
+    "-" <value:NumericExpr> => NumericExpr::Neg { value: Box::new(value) },
+    "+" <value:NumericExpr> => <>,
+
+    #[precedence(level = "1")]
+    #[assoc(side = "left")]
+    <left:NumericExpr> "*" <right:NumericExpr> => NumericExpr::Mul { left: Box::new(left), right: Box::new(right) },
+    <left:NumericExpr> "/" <right:NumericExpr> => NumericExpr::Div { left: Box::new(left), right: Box::new(right) },
+
+    #[precedence(level = "2")]
+    #[assoc(side = "left")]
+    <left:NumericExpr> "+" <right:NumericExpr> => NumericExpr::Add { left: Box::new(left), right: Box::new(right) },
+    <left:NumericExpr> "-" <right:NumericExpr> => NumericExpr::Sub { left: Box::new(left), right: Box::new(right) },
+};
+NumericTerm: NumericExpr = {
+    r"[0-9]+" => NumericExpr::Constant { value: Rational64::new(<>.parse().unwrap(), 1) },
+    r"S\([^)]+\)" => NumericExpr::DetectorValue { vertex: <>[2..<>.len() - 1].to_owned() },
+    r"dom\([^)]+\)" => NumericExpr::DominationNumber { vertex: <>[4..<>.len() - 1].to_owned() },
+    "sum(S)" => NumericExpr::DetectorValueSum,
+    "(" <NumericExpr> ")" => <>,
+};
+
+pub GraphExpr: GraphExpr = {
+    #[precedence(level = "0")]
+    GraphTerm => <>,
+
+    #[precedence(level = "1")]
+    #[assoc(side = "left")]
+    <left:GraphExpr> "*" <right:GraphExpr> => GraphExpr::CartesianProduct { left: Box::new(left), right: Box::new(right) },
+};
+GraphTerm: GraphExpr = {
+    r"[pP][0-9]+" => GraphExpr::Path { size: <>[1..].parse().unwrap() },
+    r"[cC][0-9]+" => GraphExpr::Cycle { size: <>[1..].parse().unwrap() },
+    r"file([^)]+)" => GraphExpr::File { path: <>[5..<>.len() - 1].to_owned() },
+};

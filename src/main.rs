@@ -18,6 +18,85 @@ use z3::ast::{Bool, Real, Int, Ast};
 
 use num_rational::Rational64;
 
+use lalrpop_util::lalrpop_mod;
+
+lalrpop_mod!(grammar);
+
+#[derive(Debug)]
+enum BoolExpr {
+    Constant { value: bool },
+
+    Not { value: Box<BoolExpr> },
+
+    Less { left: Box<NumericExpr>, right: Box<NumericExpr> },
+    LessEq { left: Box<NumericExpr>, right: Box<NumericExpr> },
+    Eq { left: Box<NumericExpr>, right: Box<NumericExpr> },
+    Neq { left: Box<NumericExpr>, right: Box<NumericExpr> },
+
+    And { left: Box<BoolExpr>, right: Box<BoolExpr> },
+    Xor { left: Box<BoolExpr>, right: Box<BoolExpr> },
+    Or { left: Box<BoolExpr>, right: Box<BoolExpr> },
+}
+#[derive(Debug)]
+enum NumericExpr {
+    Constant { value: Rational64 },
+    DetectorValue { vertex: String },
+    DominationNumber { vertex: String },
+    DetectorValueSum,
+
+    Neg { value: Box<NumericExpr> },
+
+    Mul { left: Box<NumericExpr>, right: Box<NumericExpr> },
+    Div { left: Box<NumericExpr>, right: Box<NumericExpr> },
+
+    Add { left: Box<NumericExpr>, right: Box<NumericExpr> },
+    Sub { left: Box<NumericExpr>, right: Box<NumericExpr> },
+}
+#[derive(Debug)]
+enum GraphExpr {
+    Path { size: usize },
+    Cycle { size: usize },
+    File { path: String },
+    CartesianProduct { left: Box<GraphExpr>, right: Box<GraphExpr> },
+}
+
+impl fmt::Display for BoolExpr {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            BoolExpr::Constant { value } => write!(f, "{value}"),
+
+            BoolExpr::Not { value } => write!(f, "(not {value})"),
+
+            BoolExpr::Less { left, right } => write!(f, "({left} < {right})"),
+            BoolExpr::LessEq { left, right } => write!(f, "({left} <= {right})"),
+            BoolExpr::Eq { left, right } => write!(f, "({left} == {right})"),
+            BoolExpr::Neq { left, right } => write!(f, "({left} != {right})"),
+
+            BoolExpr::And { left, right } => write!(f, "({left} and {right})"),
+            BoolExpr::Xor { left, right } => write!(f, "({left} xor {right})"),
+            BoolExpr::Or { left, right } => write!(f, "({left} or {right})"),
+        }
+    }
+}
+impl fmt::Display for NumericExpr {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            NumericExpr::Constant { value } => write!(f, "{value}"),
+            NumericExpr::DetectorValue { vertex } => write!(f, "S({vertex})"),
+            NumericExpr::DominationNumber { vertex } => write!(f, "dom({vertex})"),
+            NumericExpr::DetectorValueSum => write!(f, "sum(S)"),
+
+            NumericExpr::Neg { value } => write!(f, "-{value}"),
+
+            NumericExpr::Mul { left, right } => write!(f, "({left} * {right})"),
+            NumericExpr::Div { left, right } => write!(f, "({left} / {right})"),
+
+            NumericExpr::Add { left, right } => write!(f, "({left} + {right})"),
+            NumericExpr::Sub { left, right } => write!(f, "({left} - {right})"),
+        }
+    }
+}
+
 type Adj<'a, P> = dyn 'a + Sync + Fn(P) -> BTreeSet<P>;
 type Counter<'ctx, P> = dyn 'ctx + Fn(&BTreeSet<P>) -> Real<'ctx>;
 
@@ -195,6 +274,46 @@ fn count<'ctx, 'a, I>(context: &'ctx Context, iter: I) -> Int<'ctx> where 'ctx: 
     res
 }
 
+fn build_numeric_expr<'ctx, P: Point>(context: &(&'ctx Context, &BTreeMap<&str, P>, &BTreeMap<P, Real<'ctx>>, &Adj<'_, P>, &Param), expr: &NumericExpr) -> Real<'ctx> {
+    match expr {
+        NumericExpr::Constant { value } => Real::from_real(context.0, *value.numer() as i32, *value.denom() as i32),
+        NumericExpr::DetectorValue { vertex } => context.2[&context.1[vertex.as_str()]].clone(),
+        NumericExpr::DetectorValueSum => sum(context.0, context.2.values()),
+        NumericExpr::DominationNumber { vertex } => {
+            let p = context.1[vertex.as_str()];
+            let mut r = context.4.dom_region(p, context.3);
+            if context.4.basic.add_self {
+                r.insert(p);
+            }
+            sum(context.0, r.iter().copied().map(|x| &context.2[&x]))
+        }
+
+        NumericExpr::Neg { value } => -build_numeric_expr(context, value),
+
+        NumericExpr::Mul { left, right } => build_numeric_expr(context, left) * build_numeric_expr(context, right),
+        NumericExpr::Div { left, right } => build_numeric_expr(context, left) / build_numeric_expr(context, right),
+
+        NumericExpr::Add { left, right } => build_numeric_expr(context, left) + build_numeric_expr(context, right),
+        NumericExpr::Sub { left, right } => build_numeric_expr(context, left) - build_numeric_expr(context, right),
+    }
+}
+fn build_bool_expr<'ctx, P: Point>(context: &(&'ctx Context, &BTreeMap<&str, P>, &BTreeMap<P, Real<'ctx>>, &Adj<'_, P>, &Param), expr: &BoolExpr) -> Bool<'ctx> {
+    match expr {
+        BoolExpr::Constant { value } => Bool::from_bool(context.0, *value),
+
+        BoolExpr::Not { value } => build_bool_expr(context, value).not(),
+
+        BoolExpr::Less { left, right } => build_numeric_expr(context, left).lt(&build_numeric_expr(context, right)),
+        BoolExpr::LessEq { left, right } => build_numeric_expr(context, left).le(&build_numeric_expr(context, right)),
+        BoolExpr::Eq { left, right } => build_numeric_expr(context, left)._eq(&build_numeric_expr(context, right)),
+        BoolExpr::Neq { left, right } => build_numeric_expr(context, left)._eq(&build_numeric_expr(context, right)).not(),
+
+        BoolExpr::And { left, right } => build_bool_expr(context, left) & build_bool_expr(context, right),
+        BoolExpr::Xor { left, right } => build_bool_expr(context, left) ^ build_bool_expr(context, right),
+        BoolExpr::Or { left, right } => build_bool_expr(context, left) | build_bool_expr(context, right),
+    }
+}
+
 #[derive(Clone, Copy)]
 struct Grid {
     name: &'static str,
@@ -340,7 +459,7 @@ impl FromStr for Param {
     }
 }
 
-fn test_graph(graph: &Graph, param: &Param, exhaustive: bool, log: bool, omit_isomorphic: bool) -> Vec<BTreeMap<usize, Rational64>> {
+fn test_graph(graph: &Graph, param: &Param, exhaustive: bool, log: bool, omit_isomorphic: bool, constraint: &BoolExpr) -> Vec<BTreeMap<usize, Rational64>> {
     let petgraph_graph: petgraph::Graph<usize, ()> = {
         let mut g = petgraph::Graph::new();
         let mut nodes = Vec::with_capacity(graph.verts.len());
@@ -362,19 +481,21 @@ fn test_graph(graph: &Graph, param: &Param, exhaustive: bool, log: bool, omit_is
     let adj = |p: usize| graph.verts[p].1.iter().copied().collect();
     let distances = Distances::within_shape(&(0..n).collect(), &adj);
 
+    let vert_name_to_idx = graph.verts.iter().enumerate().map(|(i, v)| (v.0.as_str(), i)).collect::<BTreeMap<_,_>>();
+
     let context = Context::new(&Default::default());
-    let verts: Vec<Real> = (0..n).map(|p| Real::new_const(&context, format!("v{p}"))).collect();
+    let verts: BTreeMap<usize, Real> = (0..n).map(|p| (p, Real::new_const(&context, format!("v{p}")))).collect();
 
     let zero = Real::from_real(&context, 0, 1);
     let one = Real::from_real(&context, 1, 1);
 
     let s = Optimize::new(&context);
-    s.minimize(&sum(&context, verts.iter()));
+    s.minimize(&sum(&context, verts.values()));
     if param.fractional {
-        s.minimize(&count(&context, verts.iter().map(|x| x.gt(&zero))));
+        s.minimize(&count(&context, verts.values().map(|x| x.gt(&zero))));
     }
 
-    for (i, v) in verts.iter().enumerate() {
+    for (i, v) in verts.iter() {
         match param.fractional {
             true => s.assert(&(v.ge(&zero) & v.le(&one))),
             false => {
@@ -385,20 +506,22 @@ fn test_graph(graph: &Graph, param: &Param, exhaustive: bool, log: bool, omit_is
     }
 
     let count_det = |points: &BTreeSet<usize>| -> Real {
-        sum(&context, points.iter().copied().map(|p| &verts[p]))
+        sum(&context, points.iter().copied().map(|p| &verts[&p]))
     };
 
     for p in 0..n {
-        if let Some(req) = param.check_dom(&context, (p, &verts[p]), &adj, &|group| count_det(group)) {
+        if let Some(req) = param.check_dom(&context, (p, &verts[&p]), &adj, &|group| count_det(group)) {
             s.assert(&req);
         }
     }
     for pq in (0..n).combinations(2) {
         let (p, q) = (pq[0], pq[1]);
-        if let Some(req) = param.check_disty(&context, (p, &verts[p]), (q, &verts[q]), &adj, &distances, &|group| count_det(group)) {
+        if let Some(req) = param.check_disty(&context, (p, &verts[&p]), (q, &verts[&q]), &adj, &distances, &|group| count_det(group)) {
             s.assert(&req);
         }
     }
+
+    s.assert(&build_bool_expr(&(&context, &vert_name_to_idx, &verts, &adj, param), constraint));
 
     fn solution_string<I: Iterator<Item = (usize, Rational64)>>(graph: &Graph, verts: I) -> String {
         let mut names: Vec<_> = verts.map(|v| (graph.verts[v.0].0.as_str(), v.1)).collect();
@@ -424,7 +547,7 @@ fn test_graph(graph: &Graph, param: &Param, exhaustive: bool, log: bool, omit_is
         match s.check(&[]) {
             SatResult::Sat => {
                 let model = s.get_model().unwrap();
-                let detectors: BTreeMap<usize, Rational64> = verts.iter().map(|v| model.eval(v, false).unwrap().as_real().unwrap()).map(|(p, q)| Rational64::new(p, q)).enumerate().collect();
+                let detectors: BTreeMap<usize, Rational64> = verts.iter().map(|v| (*v.0, model.eval(v.1, false).unwrap().as_real().unwrap())).map(|(i, (p, q))| (i, Rational64::new(p, q))).collect();
                 let value = detectors.iter().map(|x| x.1).sum::<Rational64>();
 
                 match &minimum_value {
@@ -436,7 +559,7 @@ fn test_graph(graph: &Graph, param: &Param, exhaustive: bool, log: bool, omit_is
                 }
 
                 let mut different_answer = Bool::from_bool(&context, false);
-                for (i, v) in verts.iter().enumerate() {
+                for (i, v) in verts.iter() {
                     let value = detectors.get(&i).copied().unwrap();
                     different_answer |= v._eq(&Real::from_real(&context, *value.numer() as i32, *value.denom() as i32)).not();
                 }
@@ -647,6 +770,14 @@ impl Graph {
 
         Ok(Graph { verts })
     }
+    fn build(expr: &GraphExpr) -> Result<Graph, GraphParseError> {
+        match expr {
+            GraphExpr::Path { size } => Ok(Graph::by_adj(&(0..*size).collect::<Vec<_>>(), |&x| format!("{x}"), |&x, &y| x.abs_diff(y) == 1)),
+            GraphExpr::Cycle { size } => Ok(Graph::by_adj(&(0..*size).collect::<Vec<_>>(), |&x| format!("{x}"), |&x, &y| x.abs_diff(y) == 1 || x.abs_diff(y) == *size - 1)),
+            GraphExpr::File { path } => Graph::read(&mut BufReader::new(File::open(path).unwrap())),
+            GraphExpr::CartesianProduct { left, right } => Ok(Graph::build(left)?.cartesian_product(&Graph::build(right)?)),
+        }
+    }
     fn by_adj<T, N, A>(points: &[T], namer: N, is_adj: A) -> Self where N: Fn(&T) -> String, A: Fn(&T, &T) -> bool {
         let mut verts = Vec::with_capacity(points.len());
         for (i, v) in points.iter().enumerate() {
@@ -665,7 +796,7 @@ impl Graph {
         Self::by_adj(
             &self.verts.iter().enumerate().cartesian_product(other.verts.iter().enumerate()).collect::<Vec<_>>(),
             |x| format!("{},{}", x.0.1.0, x.1.1.0),
-            |x, y| (x.0.0 == y.0.0 && other.verts[x.1.0].1.contains(&y.1.0)) || (x.1.0 == y.1.0 && self.verts[x.0.0].1.contains(&y.0.0))
+            |x, y| (x.0.0 == y.0.0 && other.verts[x.1.0].1.contains(&y.1.0)) || (x.1.0 == y.1.0 && self.verts[x.0.0].1.contains(&y.0.0)),
         )
     }
 }
@@ -722,9 +853,8 @@ enum Mode {
     },
     /// Minimum value for a finite graph.
     Finite {
-        /// Path to a file containing the finite graph encoded as a sequence of whitespace-separated u:v edges.
-        /// Or "-" to read from stdin.
-        src: String,
+        /// The graph to operate on - can be a path to a file containing the finite graph encoded as a sequence of whitespace-separated u:v edges.
+        graph: String,
         /// The graph parameter to check; e.g., old, ic, red:old, red:ic, etc.
         param: Param,
 
@@ -733,8 +863,12 @@ enum Mode {
         all: bool,
 
         /// Also output isomorphic/redundant solutions when running in exhaustive mode
-        #[clap(long)]
+        #[clap(short, long)]
         include_iso: bool,
+
+        /// An additional, optional constraint that will be enforced on the solution.
+        #[clap(short, long, default_value_t = String::from("true"))]
+        constraint: String,
     },
 }
 
@@ -777,41 +911,12 @@ fn main() {
 
             println!("\ntested {} geometries", shapes_total.load(MemOrder::Relaxed));
         }
-        Mode::Finite { src, param, all, include_iso } => {
-            let mut graph: Option<Graph> = None;
-            let mut stdin_graph = None;
-            for src in src.split('*') {
-                let lower = src.to_ascii_lowercase();
-                let g2 = {
-                    if lower == "-" {
-                        if stdin_graph.is_none() {
-                            stdin_graph = Some(Graph::read(&mut BufReader::new(io::stdin())).expect("failed to read graph from stdin"));
-                        }
-                        Some(stdin_graph.as_ref().unwrap().clone())
-                    } else if lower.starts_with('p') {
-                        if let Ok(n) = lower[1..].parse::<usize>() {
-                            Some(Graph::by_adj(&(0..n).collect::<Vec<_>>(), |&x| format!("{x}"), |&x, &y| x.abs_diff(y) == 1))
-                        } else {
-                            None
-                        }
-                    } else if lower.starts_with('c') {
-                        if let Ok(n) = lower[1..].parse::<usize>() {
-                            Some(Graph::by_adj(&(0..n).collect::<Vec<_>>(), |&x| format!("{x}"), |&x, &y| x.abs_diff(y) == 1 || x.abs_diff(y) == n - 1))
-                        } else {
-                            None
-                        }
-                    } else {
-                        None
-                    }
-                };
-                let g2 = g2.unwrap_or_else(|| Graph::read(&mut BufReader::new(File::open(src).unwrap())).expect("failed to read graph from file"));
+        Mode::Finite { graph, param, all, include_iso, constraint } => {
+            let graph = Graph::build(&grammar::GraphExprParser::new().parse(&graph).unwrap()).unwrap();
+            let constraint = grammar::BoolExprParser::new().parse(&constraint).unwrap();
 
-                graph = Some(if let Some(g1) = graph { g1.cartesian_product(&g2) } else { g2 });
-            }
-            let graph = graph.unwrap();
-
-            println!("checking {}\nG = {}\nn = {}\ne = {}\n", param.get_name(), graph, graph.verts.len(), graph.verts.iter().map(|x| x.1.len()).sum::<usize>() / 2);
-            test_graph(&graph, &param, all, true, !include_iso);
+            println!("checking {}\nG = {}\nn = {}\ne = {}\n\nsubject to constraint: {constraint}\n", param.get_name(), graph, graph.verts.len(), graph.verts.iter().map(|x| x.1.len()).sum::<usize>() / 2);
+            test_graph(&graph, &param, all, true, !include_iso, &constraint);
         }
     }
 }
