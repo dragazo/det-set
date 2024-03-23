@@ -10,7 +10,7 @@ itertools = "0.10.5"
 clap = { version = "3.2.25", features = ["derive"] }
 numeric-sort = "0.1.0"
 num-rational = "0.4.1"
-z3 = "0.11.2"
+z3 = "0.12.1"
 petgraph = "0.6.3"
 num_cpus = "1.16.0"
 lalrpop-util = { version = "0.20.2", features = ["lexer", "unicode"] }

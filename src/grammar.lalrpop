@@ -8,7 +8,7 @@ pub BoolExpr: BoolExpr = {
 
     #[precedence(level = "1")]
     #[assoc(side = "left")]
-    <left:NumericExpr> "==" <right:NumericExpr> => BoolExpr::Eq { left: Box::new(left), right: Box::new(right) },
+    <left:NumericExpr> "=" <right:NumericExpr> => BoolExpr::Eq { left: Box::new(left), right: Box::new(right) },
     <left:NumericExpr> "!=" <right:NumericExpr> => BoolExpr::Neq { left: Box::new(left), right: Box::new(right) },
     <left:NumericExpr> "<" <right:NumericExpr> => BoolExpr::Less { left: Box::new(left), right: Box::new(right) },
     <left:NumericExpr> "<=" <right:NumericExpr> => BoolExpr::LessEq { left: Box::new(left), right: Box::new(right) },
@@ -58,6 +58,7 @@ NumericTerm: NumericExpr = {
     r"[0-9]+" => NumericExpr::Constant { value: Rational64::new(<>.parse().unwrap(), 1) },
     r"S\([^)]+\)" => NumericExpr::DetectorValue { vertex: <>[2..<>.len() - 1].to_owned() },
     r"dom\([^)]+\)" => NumericExpr::DominationNumber { vertex: <>[4..<>.len() - 1].to_owned() },
+    r"sh\([^)]+\)" => NumericExpr::Share { vertex: <>[3..<>.len() - 1].to_owned() },
     "sum(S)" => NumericExpr::DetectorValueSum,
     "(" <NumericExpr> ")" => <>,
 };
@@ -69,6 +70,7 @@ pub GraphExpr: GraphExpr = {
     #[precedence(level = "1")]
     #[assoc(side = "left")]
     <left:GraphExpr> "*" <right:GraphExpr> => GraphExpr::CartesianProduct { left: Box::new(left), right: Box::new(right) },
+    <left:GraphExpr> "**" <right:GraphExpr> => GraphExpr::KingCartesianProduct { left: Box::new(left), right: Box::new(right) },
 };
 GraphTerm: GraphExpr = {
     r"[pP][0-9]+" => GraphExpr::Path { size: <>[1..].parse().unwrap() },

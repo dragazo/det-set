@@ -16,6 +16,7 @@
         "cpus",
         "lalrpop",
         "numer",
-        "petgraph"
+        "petgraph",
+        "satisfiability"
     ]
 }

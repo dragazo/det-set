@@ -40,9 +40,12 @@ enum BoolExpr {
 #[derive(Debug)]
 enum NumericExpr {
     Constant { value: Rational64 },
+
     DetectorValue { vertex: String },
-    DominationNumber { vertex: String },
     DetectorValueSum,
+
+    DominationNumber { vertex: String },
+    Share { vertex: String },
 
     Neg { value: Box<NumericExpr> },
 
@@ -58,6 +61,7 @@ enum GraphExpr {
     Cycle { size: usize },
     File { path: String },
     CartesianProduct { left: Box<GraphExpr>, right: Box<GraphExpr> },
+    KingCartesianProduct { left: Box<GraphExpr>, right: Box<GraphExpr> },
 }
 
 impl fmt::Display for BoolExpr {
@@ -82,9 +86,12 @@ impl fmt::Display for NumericExpr {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             NumericExpr::Constant { value } => write!(f, "{value}"),
+
+            NumericExpr::DetectorValueSum => write!(f, "sum(S)"),
+
             NumericExpr::DetectorValue { vertex } => write!(f, "S({vertex})"),
             NumericExpr::DominationNumber { vertex } => write!(f, "dom({vertex})"),
-            NumericExpr::DetectorValueSum => write!(f, "sum(S)"),
+            NumericExpr::Share { vertex } => write!(f, "sh({vertex})"),
 
             NumericExpr::Neg { value } => write!(f, "-{value}"),
 
@@ -257,7 +264,7 @@ fn get_tilings(shape: &BTreeSet<(i32, i32)>) -> Vec<(BTreeMap<(i32, i32), (i32, 
     tilings.into_iter().map(|(tiling, (b1, b2))| (tiling, b1, b2)).collect()
 }
 
-fn sum<'ctx, 'a, I>(context: &'ctx Context, iter: I) -> Real<'ctx> where 'ctx: 'a, I: Iterator<Item = &'a Real<'ctx>> {
+fn sum<'ctx, I>(context: &'ctx Context, iter: I) -> Real<'ctx> where I: Iterator<Item = Real<'ctx>> {
     let mut res = Real::from_real(context, 0, 1);
     for v in iter {
         res += v;
@@ -275,18 +282,17 @@ fn count<'ctx, 'a, I>(context: &'ctx Context, iter: I) -> Int<'ctx> where 'ctx: 
 }
 
 fn build_numeric_expr<'ctx, P: Point>(context: &(&'ctx Context, &BTreeMap<&str, P>, &BTreeMap<P, Real<'ctx>>, &Adj<'_, P>, &Param), expr: &NumericExpr) -> Real<'ctx> {
+    let dom = |p: P| sum(context.0, context.4.dom_region(p, context.3).iter().copied().map(|x| context.2[&x].clone()));
     match expr {
         NumericExpr::Constant { value } => Real::from_real(context.0, *value.numer() as i32, *value.denom() as i32),
         NumericExpr::DetectorValue { vertex } => context.2[&context.1[vertex.as_str()]].clone(),
-        NumericExpr::DetectorValueSum => sum(context.0, context.2.values()),
-        NumericExpr::DominationNumber { vertex } => {
-            let p = context.1[vertex.as_str()];
-            let mut r = context.4.dom_region(p, context.3);
-            if context.4.basic.add_self {
-                r.insert(p);
-            }
-            sum(context.0, r.iter().copied().map(|x| &context.2[&x]))
-        }
+        NumericExpr::DetectorValueSum => sum(context.0, context.2.values().cloned()),
+        NumericExpr::DominationNumber { vertex } => dom(context.1[vertex.as_str()]),
+        NumericExpr::Share { vertex } => {
+            let p: P = context.1[vertex.as_str()];
+            let det_val: &Real = &context.2[&p];
+            sum(context.0, context.4.dom_region(p, context.3).iter().copied().map(|pp| det_val / dom(pp)))
+        },
 
         NumericExpr::Neg { value } => -build_numeric_expr(context, value),
 
@@ -369,7 +375,7 @@ impl Param {
         res.push_str(self.basic.name);
         res
     }
-    fn dom_region<P: Point>(&self, p: P, adj: &Adj<P>) -> BTreeSet<P> {
+    fn neighborhood<P: Point>(&self, p: P, adj: &Adj<P>) -> BTreeSet<P> {
         let mut res = adj(p);
         match self.basic.dom_kind {
             DomKind::Open => assert!(!res.contains(&p)),
@@ -377,19 +383,22 @@ impl Param {
         }
         res
     }
+    fn dom_region<P: Point>(&self, p: P, adj: &Adj<P>) -> BTreeSet<P> {
+        let mut res = self.neighborhood(p, adj);
+        if self.basic.add_self {
+            res.insert(p);
+        }
+        res
+    }
     fn check_dom<'ctx, P: Point>(&self, context: &'ctx Context, p: (P, &Real<'ctx>), adj: &Adj<P>, counter: &Counter<'ctx, P>) -> Option<Bool<'ctx>> {
         if self.basic.dom == 0 { return None }
-        let mut r = self.dom_region(p.0, adj);
-        if self.basic.add_self {
-            r.insert(p.0);
-        }
-        let value = counter(&r);
+        let value = counter(&self.dom_region(p.0, adj));
         let req = Real::from_real(context, self.basic.dom as i32, 1);
         Some(if self.efficient { value._eq(&req) } else { value.ge(&req) })
     }
     fn check_disty<'ctx, P: Point>(&self, context: &'ctx Context, p: (P, &Real<'ctx>), q: (P, &Real<'ctx>), adj: &Adj<P>, distances: &Distances<P>, counter: &Counter<'ctx, P>) -> Option<Bool<'ctx>> {
         if self.basic.disty == 0 || distances.get(p.0, q.0) >= 3 { return None }
-        let regions = (self.dom_region(p.0, adj), self.dom_region(q.0, adj));
+        let regions = (self.neighborhood(p.0, adj), self.neighborhood(q.0, adj));
         let req = Real::from_real(context, self.basic.disty as i32, 1);
         let mut r1: BTreeSet<P> = &regions.0 - &regions.1;
         let mut r2: BTreeSet<P> = &regions.1 - &regions.0;
@@ -490,7 +499,7 @@ fn test_graph(graph: &Graph, param: &Param, exhaustive: bool, log: bool, omit_is
     let one = Real::from_real(&context, 1, 1);
 
     let s = Optimize::new(&context);
-    s.minimize(&sum(&context, verts.values()));
+    s.minimize(&sum(&context, verts.values().cloned()));
     if param.fractional {
         s.minimize(&count(&context, verts.values().map(|x| x.gt(&zero))));
     }
@@ -506,7 +515,7 @@ fn test_graph(graph: &Graph, param: &Param, exhaustive: bool, log: bool, omit_is
     }
 
     let count_det = |points: &BTreeSet<usize>| -> Real {
-        sum(&context, points.iter().copied().map(|p| &verts[&p]))
+        sum(&context, points.iter().copied().map(|p| verts[&p].clone()))
     };
 
     for p in 0..n {
@@ -581,7 +590,7 @@ fn test_graph(graph: &Graph, param: &Param, exhaustive: bool, log: bool, omit_is
                 }
             }
             SatResult::Unsat => break,
-            SatResult::Unknown => unreachable!(),
+            SatResult::Unknown => panic!("z3 reported UNKNOWN satisfiability"),
         }
     }
 
@@ -641,7 +650,7 @@ fn test_tiling(shape: &BTreeSet<(i32, i32)>, grid: &Grid, param: &Param, log: bo
     let one = Real::from_real(&context, 1, 1);
 
     let s = Optimize::new(&context);
-    s.minimize(&sum(&context, verts.values()));
+    s.minimize(&sum(&context, verts.values().cloned()));
     if param.fractional {
         s.minimize(&count(&context, verts.values().map(|x| x.gt(&zero))));
     }
@@ -657,7 +666,7 @@ fn test_tiling(shape: &BTreeSet<(i32, i32)>, grid: &Grid, param: &Param, log: bo
     }
 
     let count_det = |points: &BTreeSet<(i32, i32)>, tiling: &BTreeMap<(i32, i32), (i32, i32)>| -> Real {
-        sum(&context, points.iter().map(|p| &verts[&tiling[p]]))
+        sum(&context, points.iter().map(|p| verts[&tiling[p]].clone()))
     };
 
     let identity_map = shape.iter().copied().map(|p| (p, p)).collect();
@@ -776,6 +785,7 @@ impl Graph {
             GraphExpr::Cycle { size } => Ok(Graph::by_adj(&(0..*size).collect::<Vec<_>>(), |&x| format!("{x}"), |&x, &y| x.abs_diff(y) == 1 || x.abs_diff(y) == *size - 1)),
             GraphExpr::File { path } => Graph::read(&mut BufReader::new(File::open(path).unwrap())),
             GraphExpr::CartesianProduct { left, right } => Ok(Graph::build(left)?.cartesian_product(&Graph::build(right)?)),
+            GraphExpr::KingCartesianProduct { left, right } => Ok(Graph::build(left)?.king_cartesian_product(&Graph::build(right)?)),
         }
     }
     fn by_adj<T, N, A>(points: &[T], namer: N, is_adj: A) -> Self where N: Fn(&T) -> String, A: Fn(&T, &T) -> bool {
@@ -797,6 +807,13 @@ impl Graph {
             &self.verts.iter().enumerate().cartesian_product(other.verts.iter().enumerate()).collect::<Vec<_>>(),
             |x| format!("{},{}", x.0.1.0, x.1.1.0),
             |x, y| (x.0.0 == y.0.0 && other.verts[x.1.0].1.contains(&y.1.0)) || (x.1.0 == y.1.0 && self.verts[x.0.0].1.contains(&y.0.0)),
+        )
+    }
+    fn king_cartesian_product(&self, other: &Self) -> Self {
+        Self::by_adj(
+            &self.verts.iter().enumerate().cartesian_product(other.verts.iter().enumerate()).collect::<Vec<_>>(),
+            |x| format!("{},{}", x.0.1.0, x.1.1.0),
+            |x, y| (x.0.0 == y.0.0 && other.verts[x.1.0].1.contains(&y.1.0)) || (x.1.0 == y.1.0 && self.verts[x.0.0].1.contains(&y.0.0)) || (other.verts[x.1.0].1.contains(&y.1.0) && self.verts[x.0.0].1.contains(&y.0.0)),
         )
     }
 }
