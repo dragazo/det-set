@@ -13,7 +13,7 @@ use std::sync::atomic::{AtomicUsize, Ordering as MemOrder};
 use itertools::Itertools;
 use clap::Parser;
 
-use z3::{Context, Optimize, SatResult};
+use z3::{Context, Solver, Optimize, SatResult, Model};
 use z3::ast::{Bool, Real, Int, Ast};
 
 use num_rational::Rational64;
@@ -264,6 +264,31 @@ fn get_tilings(shape: &BTreeSet<(i32, i32)>) -> Vec<(BTreeMap<(i32, i32), (i32, 
     tilings.into_iter().map(|(tiling, (b1, b2))| (tiling, b1, b2)).collect()
 }
 
+enum MergedSolver<'ctx> {
+    Solver(z3::Solver<'ctx>),
+    Optimize(z3::Optimize<'ctx>),
+}
+impl<'ctx> MergedSolver<'ctx> {
+    fn assert(&self, constraint: &Bool<'ctx>) {
+        match self {
+            MergedSolver::Solver(s) => s.assert(constraint),
+            MergedSolver::Optimize(s) => s.assert(constraint),
+        }
+    }
+    fn check(&self) -> SatResult {
+        match self {
+            MergedSolver::Solver(s) => s.check(),
+            MergedSolver::Optimize(s) => s.check(&[]),
+        }
+    }
+    fn get_model(&self) -> Option<Model<'ctx>> {
+        match self {
+            MergedSolver::Solver(s) => s.get_model(),
+            MergedSolver::Optimize(s) => s.get_model(),
+        }
+    }
+}
+
 fn sum<'ctx, I>(context: &'ctx Context, iter: I) -> Real<'ctx> where I: Iterator<Item = Real<'ctx>> {
     let mut res = Real::from_real(context, 0, 1);
     for v in iter {
@@ -468,7 +493,7 @@ impl FromStr for Param {
     }
 }
 
-fn test_graph(graph: &Graph, param: &Param, exhaustive: bool, log: bool, omit_isomorphic: bool, constraint: &BoolExpr) -> Vec<BTreeMap<usize, Rational64>> {
+fn test_graph(graph: &Graph, param: &Param, exhaustive: bool, log: bool, omit_isomorphic: bool, optimize: bool, constraint: &BoolExpr) -> Vec<BTreeMap<usize, Rational64>> {
     let petgraph_graph: petgraph::Graph<usize, ()> = {
         let mut g = petgraph::Graph::new();
         let mut nodes = Vec::with_capacity(graph.verts.len());
@@ -498,11 +523,17 @@ fn test_graph(graph: &Graph, param: &Param, exhaustive: bool, log: bool, omit_is
     let zero = Real::from_real(&context, 0, 1);
     let one = Real::from_real(&context, 1, 1);
 
-    let s = Optimize::new(&context);
-    s.minimize(&sum(&context, verts.values().cloned()));
-    if param.fractional {
-        s.minimize(&count(&context, verts.values().map(|x| x.gt(&zero))));
-    }
+    let s = match optimize {
+        true => {
+            let s = Optimize::new(&context);
+            s.minimize(&sum(&context, verts.values().cloned()));
+            if param.fractional {
+                s.minimize(&count(&context, verts.values().map(|x| x.gt(&zero))));
+            }
+            MergedSolver::Optimize(s)
+        }
+        false => MergedSolver::Solver(Solver::new(&context)),
+    };
 
     for (i, v) in verts.iter() {
         match param.fractional {
@@ -553,17 +584,22 @@ fn test_graph(graph: &Graph, param: &Param, exhaustive: bool, log: bool, omit_is
     let mut solutions: Vec<BTreeMap<usize, Rational64>> = vec![];
     let mut minimum_value = None;
     loop {
-        match s.check(&[]) {
+        match s.check() {
             SatResult::Sat => {
                 let model = s.get_model().unwrap();
                 let detectors: BTreeMap<usize, Rational64> = verts.iter().map(|v| (*v.0, model.eval(v.1, false).unwrap().as_real().unwrap())).map(|(i, (p, q))| (i, Rational64::new(p, q))).collect();
-                let value = detectors.iter().map(|x| x.1).sum::<Rational64>();
 
+                let value = detectors.values().sum::<Rational64>();
                 match &minimum_value {
                     None => minimum_value = Some(value),
-                    Some(min) => {
-                        assert!(*min <= value);
-                        if *min < value { break }
+                    Some(prev_min) => match optimize {
+                        true => {
+                            assert!(*prev_min <= value);
+                            if *prev_min < value { break }
+                        }
+                        false => if value < *prev_min {
+                            minimum_value = Some(value);
+                        }
                     }
                 }
 
@@ -581,7 +617,7 @@ fn test_graph(graph: &Graph, param: &Param, exhaustive: bool, log: bool, omit_is
                 if log {
                     let s = solution_string(graph, detectors.iter().map(|x| (*x.0, *x.1)));
                     let s_bar = solution_string(graph, detectors.iter().filter(|x| *x.1.numer() == 0).map(|x| (*x.0, Rational64::new(1, 1))));
-                    println!("solution {}: S = {s}, !S = {s_bar}", solutions.len() + 1);
+                    println!("solution {}: sum(S) = {value}, S = {s}, !S = {s_bar}", solutions.len() + 1);
                 }
 
                 solutions.push(detectors);
@@ -590,17 +626,17 @@ fn test_graph(graph: &Graph, param: &Param, exhaustive: bool, log: bool, omit_is
                 }
             }
             SatResult::Unsat => break,
-            SatResult::Unknown => panic!("z3 reported UNKNOWN satisfiability"),
+            SatResult::Unknown => panic!("z3 reported unknown satisfiability - consider disabling optimization mode"),
         }
     }
 
     if log {
         match &minimum_value {
             Some(value) => match (exhaustive, omit_isomorphic) {
-                (false, _) => println!("\nfound a minimum solution of size {}", Verbose(value)),
-                (true, true) => println!("\nexhausted all {} non-isomorphic minimum solutions of size {}", solutions.len(), Verbose(value)),
+                (false, _) => println!("\nfound a {}solution of size {}", if optimize { "minimum " } else { "" }, Verbose(value)),
+                (true, true) => println!("\nexhausted all {} non-isomorphic {}solutions of size {}", solutions.len(), if optimize { "minimum " } else { "" }, Verbose(value)),
                 (true, false) => {
-                    println!("\nexhausted all {} minimum solutions of size {}\n", solutions.len(), Verbose(value));
+                    println!("\nexhausted all {} {}solutions of size {}\n", solutions.len(), if optimize { "minimum " } else { "" }, Verbose(value));
 
                     let mut always_detectors = vec![true; n];
                     let mut never_detectors = vec![true; n];
@@ -870,21 +906,29 @@ enum Mode {
     },
     /// Minimum value for a finite graph.
     Finite {
-        /// The graph to operate on - can be a path to a file containing the finite graph encoded as a sequence of whitespace-separated u:v edges.
+        /// The graph expression to operate on.
+        /// This supports the syntax Pn and Cn for paths and cycles on n vertices.
+        /// The * operator denotes the cartesian product of graphs, while ** denotes the king cartesian product.
+        /// The syntax file(<path>) allows loading a graph from a file,
+        /// which should be a whitespace-separated sequence of a:b tokens denoting edges (and implicitly vertices) in the graph.
         graph: String,
         /// The graph parameter to check; e.g., old, ic, red:old, red:ic, etc.
         param: Param,
 
-        /// Exhaustively generate all minimum-valued solutions.
+        /// Exhaustively generate all solutions
         #[clap(short, long)]
         all: bool,
 
-        /// Also output isomorphic/redundant solutions when running in exhaustive mode
-        #[clap(short, long)]
+        /// Include isomorphic solutions in output
+        #[clap(long)]
         include_iso: bool,
 
-        /// An additional, optional constraint that will be enforced on the solution.
-        #[clap(short, long, default_value_t = String::from("true"))]
+        /// Make the solver output only optimal solutions
+        #[clap(long)]
+        include_suboptimal: bool,
+
+        /// Extra constraint on output solutions
+        #[clap(long, default_value_t = String::from("true"))]
         constraint: String,
     },
 }
@@ -928,12 +972,12 @@ fn main() {
 
             println!("\ntested {} geometries", shapes_total.load(MemOrder::Relaxed));
         }
-        Mode::Finite { graph, param, all, include_iso, constraint } => {
+        Mode::Finite { graph, param, all, include_iso, include_suboptimal, constraint } => {
             let graph = Graph::build(&grammar::GraphExprParser::new().parse(&graph).unwrap()).unwrap();
             let constraint = grammar::BoolExprParser::new().parse(&constraint).unwrap();
 
             println!("checking {}\nG = {}\nn = {}\ne = {}\n\nsubject to constraint: {constraint}\n", param.get_name(), graph, graph.verts.len(), graph.verts.iter().map(|x| x.1.len()).sum::<usize>() / 2);
-            test_graph(&graph, &param, all, true, !include_iso, &constraint);
+            test_graph(&graph, &param, all, true, !include_iso, !include_suboptimal, &constraint);
         }
     }
 }
