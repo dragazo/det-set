@@ -233,9 +233,11 @@ impl<P: Point> Distances<P> {
     }
 }
 
-const TILE_RADIUS: i32 = 3;
 fn get_tilings(shape: &BTreeSet<(i32, i32)>) -> Vec<(BTreeMap<(i32, i32), (i32, i32)>, (i32, i32), (i32, i32))> {
-    let inflated = inflate(shape, &adj_k, 3);
+    const TILE_RADIUS: i32 = 3;
+    const CHECK_PADDING: usize = 3;
+
+    let inflated = inflate(shape, &adj_k, CHECK_PADDING);
     let size = get_size(shape);
     let mut tilings: BTreeMap<BTreeMap<(i32, i32), (i32, i32)>, ((i32, i32), (i32, i32))> = Default::default();
     for dr1 in 0..=2*size.0 as i32 {
@@ -262,6 +264,89 @@ fn get_tilings(shape: &BTreeSet<(i32, i32)>) -> Vec<(BTreeMap<(i32, i32), (i32, 
         }
     }
     tilings.into_iter().map(|(tiling, (b1, b2))| (tiling, b1, b2)).collect()
+}
+
+fn get_tilings_fast(shape: &BTreeSet<(i32, i32)>) -> Vec<(BTreeMap<(i32, i32), (i32, i32)>, (i32, i32), (i32, i32))> {
+    let inflated = inflate(shape, &adj_k, 3);
+    let size = get_size(shape);
+
+    let context = z3::Context::new(&Default::default());
+    let s = z3::Solver::new(&context);
+
+    let (dr1, dc1) = (Int::new_const(&context, "dr1"), Int::new_const(&context, "dc1"));
+    let (dr2, dc2) = (Int::new_const(&context, "dr2"), Int::new_const(&context, "dc2"));
+    let (pr, pc) = (Int::new_const(&context, "pr"), Int::new_const(&context, "pc"));
+    let (qr, qc) = (Int::new_const(&context, "qr"), Int::new_const(&context, "qc"));
+    let (i, j) = (Int::new_const(&context, "i"), Int::new_const(&context, "j"));
+
+    let (zero, one) = (Int::from_i64(&context, 0), Int::from_i64(&context, 1));
+    let exist_ij_spans = z3::ast::exists_const(&context, &[&i, &j], &[], &(qr._eq(&(&pr + &i * &dr1 + &j * &dr2)) & qc._eq(&(&pc + &i * &dc1 + &j * &dc2))));
+    s.assert(&z3::ast::forall_const(&context, &[&qr, &qc], &[], &{
+        let mut classes = Int::from_i64(&context, 0);
+        for (r, c) in shape.iter().copied() {
+            classes += (pr._eq(&Int::from_i64(&context, r as i64)) & pc._eq(&Int::from_i64(&context, c as i64)) & &exist_ij_spans).ite(&one, &zero);
+        }
+        classes._eq(&one)
+    }));
+
+    let (dr_max, dc_max) = (Int::from_i64(&context, 2 * size.0 as i64), Int::from_i64(&context, 2 * size.1 as i64));
+    s.assert(&(dr1.ge(&zero) & dc1.ge(&zero) & dr2.ge(&zero) & dc2.ge(&zero)));
+    s.assert(&(dr1.le(&dr_max) & dc1.le(&dc_max) & dr2.le(&dr_max) & dc2.le(&dc_max)));
+
+    let mut tilings: BTreeMap<BTreeMap<(i32, i32), (i32, i32)>, ((i32, i32), (i32, i32))> = Default::default();
+    const TILE_RADIUS: i32 = 3;
+
+    loop {
+        match s.check() {
+            SatResult::Sat => {
+
+
+                let model = s.get_model().unwrap();
+
+                let b1 = (model.eval(&dr1, false).unwrap().as_i64().unwrap() as i32, model.eval(&dc1, false).unwrap().as_i64().unwrap() as i32);
+                let b2 = (model.eval(&dr2, false).unwrap().as_i64().unwrap() as i32, model.eval(&dc2, false).unwrap().as_i64().unwrap() as i32);
+
+                let mut res: BTreeMap<(i32, i32), (i32, i32)> = Default::default();
+                for m1 in -TILE_RADIUS..=TILE_RADIUS {
+                    for m2 in -TILE_RADIUS..=TILE_RADIUS {
+                        for (r, c) in shape.iter().copied() {
+                            let p = (r + m1 * b1.0 + m2 * b2.0, c + m1 * b1.1 + m2 * b2.1);
+                            if res.insert(p, (r, c)).is_some() { unreachable!() }
+                        }
+                    }
+                }
+                for p in inflated.iter() {
+                    if !res.contains_key(p) { unreachable!() }
+                }
+                res.retain(|p, _| inflated.contains(p));
+                tilings.entry(res).or_insert((b1, b2));
+
+                let mut different_answer = Bool::from_bool(&context, false);
+                for (a, b) in [(&dr1, b1.0), (&dc1, b1.1), (&dr2, b2.0), (&dc2, b2.1)] {
+                    different_answer |= !a._eq(&Int::from_i64(&context, b as i64));
+                }
+                s.assert(&different_answer);
+            }
+            SatResult::Unsat => return tilings.into_iter().map(|(tiling, (b1, b2))| (tiling, b1, b2)).collect(),
+            SatResult::Unknown => panic!(),
+        }
+    }
+}
+
+#[test]
+fn test_get_tilings() {
+    macro_rules! check {
+        ($shape:expr) => {{
+            let shape = $shape;
+            let a = get_tilings(&shape);
+            let b = get_tilings_fast(&shape);
+            if a.len() != b.len() {
+                panic!("{} vs {}\n{shape:?}", a.len(), b.len());
+            }
+        }};
+    }
+
+    check!([(0, 0)].into_iter().collect());
 }
 
 enum MergedSolver<'ctx> {
