@@ -1,3 +1,5 @@
 /target
 /*.txt
 Cargo.lock
+flamegraph*
+perf*

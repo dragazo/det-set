@@ -210,6 +210,20 @@ fn get_interior<P: Point>(shape: &BTreeSet<P>, adj: &Adj<P>) -> BTreeSet<P> {
     shape.iter().copied().filter(|u| adj(*u).into_iter().all(|v| shape.contains(&v))).collect()
 }
 
+#[test]
+fn test_inflate() {
+    assert_eq!(inflate(&[(0, 0)].into_iter().collect(), &adj_k, 0).len(), 1);
+    assert_eq!(inflate(&[(0, 0)].into_iter().collect(), &adj_k, 1).len(), 9);
+    assert_eq!(inflate(&[(0, 0)].into_iter().collect(), &adj_k, 2).len(), 25);
+    assert_eq!(inflate(&[(0, 0)].into_iter().collect(), &adj_k, 3).len(), 49);
+
+    assert_eq!(inflate(&(0..=35).map(|x| (x, 0)).collect(), &adj_k, 3).len(), 294);
+    assert_eq!(inflate(&(0..=200).map(|x| (x, 0)).collect(), &adj_k, 3).len(), 1449);
+
+    assert_eq!(inflate(&(0..=35).map(|x| (x, 0)).collect(), &adj_hex, 3).len(), 266);
+    assert_eq!(inflate(&(0..=200).map(|x| (x, 0)).collect(), &adj_hex, 3).len(), 1419);
+}
+
 struct Distances<P: Point>(BTreeMap<(P, P), usize>);
 impl<P: Point> Distances<P> {
     fn within_shape(shape: &BTreeSet<P>, adj: &Adj<P>) -> Self {
@@ -232,8 +246,15 @@ impl<P: Point> Distances<P> {
         self.0[&(p, q)]
     }
 }
+#[test]
+fn test_distances() {
+    assert_eq!(Distances::within_shape(&[(0,0)].into_iter().collect(), &adj_k).0.len(), 1);
+    assert_eq!(Distances::within_shape(&[(0,0),(0,1)].into_iter().collect(), &adj_k).0.len(), 4);
 
-fn get_tilings_impl(shape: &BTreeSet<(i32, i32)>, search_size_mults: (u32, u32), tile_radius: i32) -> Vec<(BTreeMap<(i32, i32), (i32, i32)>, (i32, i32), (i32, i32))> {
+    assert_eq!(Distances::within_shape(&(0..100).map(|x| (x, 0)).collect(), &adj_k).0.len(), 100 * 100);
+}
+
+fn get_tilings_baseline_impl(shape: &BTreeSet<(i32, i32)>, search_size_mults: (u32, u32), tile_radius: i32) -> Vec<(BTreeMap<(i32, i32), (i32, i32)>, (i32, i32), (i32, i32))> {
     let inflated = inflate(shape, &adj_k, 3);
     let size = get_size(shape);
 
@@ -266,8 +287,52 @@ fn get_tilings_impl(shape: &BTreeSet<(i32, i32)>, search_size_mults: (u32, u32),
     }
     tilings.into_iter().map(|(tiling, (b1, b2))| (tiling, b1, b2)).collect()
 }
+fn get_tilings_fast_impl(shape: &BTreeSet<(i32, i32)>, search_size_mults: (u32, u32), tile_radius: i32) -> Vec<(BTreeMap<(i32, i32), (i32, i32)>, (i32, i32), (i32, i32))> {
+    let inflated = inflate(shape, &adj_k, 3);
+    let size = get_size(shape);
+
+    let dr_range = -(search_size_mults.0 as i32) * size.0 as i32 ..= search_size_mults.1 as i32 * size.0 as i32;
+    let dc_range = -(search_size_mults.0 as i32) * size.1 as i32 ..= search_size_mults.1 as i32 * size.1 as i32;
+    let mut m_range = (-tile_radius..=tile_radius).collect::<Vec<_>>();
+    m_range.sort_by_key(|x| x.abs());
+
+    let mut basis_candidates = vec![];
+    for dr in dr_range {
+        'skip: for dc in dc_range.clone() {
+            let mut res: BTreeMap<(i32, i32), (i32, i32)> = Default::default();
+            for (r, c) in shape.iter().copied() {
+                for m in m_range.iter().copied() {
+                    let p = (r + m * dr, c + m * dc);
+                    if res.insert(p, (r, c)).is_some() { continue 'skip; }
+                }
+            }
+            basis_candidates.push((dr, dc));
+        }
+    }
+
+    let mut tilings: BTreeMap<BTreeMap<(i32, i32), (i32, i32)>, ((i32, i32), (i32, i32))> = Default::default();
+    for b1 in basis_candidates.iter().copied() {
+        'skip: for b2 in basis_candidates.iter().copied() {
+            let mut res: BTreeMap<(i32, i32), (i32, i32)> = BTreeMap::new();
+            for (r, c) in shape.iter().copied() {
+                for m1 in m_range.iter().copied() {
+                    for m2 in m_range.iter().copied() {
+                        let p = (r + m1 * b1.0 + m2 * b2.0, c + m1 * b1.1 + m2 * b2.1);
+                        if res.insert(p, (r, c)).is_some() { continue 'skip; }
+                    }
+                }
+            }
+            for p in inflated.iter() {
+                if !res.contains_key(p) { continue 'skip; }
+            }
+            res.retain(|p, _| inflated.contains(p));
+            tilings.entry(res).or_insert((b1, b2));
+        }
+    }
+    tilings.into_iter().map(|(tiling, (b1, b2))| (tiling, b1, b2)).collect()
+}
 fn get_tilings(shape: &BTreeSet<(i32, i32)>) -> Vec<(BTreeMap<(i32, i32), (i32, i32)>, (i32, i32), (i32, i32))> {
-    get_tilings_impl(shape, (0, 2), 5)
+    get_tilings_fast_impl(shape, (1, 1), 5)
 }
 
 #[test]
@@ -275,7 +340,7 @@ fn test_get_tilings() {
     macro_rules! check {
         ($shape:expr => $search_size_mult:expr, $tile_radius:expr) => {{
             let shape = $shape;
-            let a = get_tilings_impl(&shape, $search_size_mult, $tile_radius).into_iter().map(|x| x.0).collect::<BTreeSet<_>>();
+            let a = get_tilings_baseline_impl(&shape, $search_size_mult, $tile_radius).into_iter().map(|x| x.0).collect::<BTreeSet<_>>();
             let b = get_tilings(&shape).into_iter().map(|x| x.0).collect::<BTreeSet<_>>();
             if a != b {
                 panic!("{} vs {}\n{shape:?}", a.len(), b.len());
