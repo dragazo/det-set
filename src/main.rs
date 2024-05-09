@@ -233,19 +233,22 @@ impl<P: Point> Distances<P> {
     }
 }
 
-const TILE_RADIUS: i32 = 3;
-fn get_tilings(shape: &BTreeSet<(i32, i32)>) -> Vec<(BTreeMap<(i32, i32), (i32, i32)>, (i32, i32), (i32, i32))> {
+fn get_tilings_impl(shape: &BTreeSet<(i32, i32)>, search_size_mults: (u32, u32), tile_radius: i32) -> Vec<(BTreeMap<(i32, i32), (i32, i32)>, (i32, i32), (i32, i32))> {
     let inflated = inflate(shape, &adj_k, 3);
     let size = get_size(shape);
+
+    let dr_range = -(search_size_mults.0 as i32) * size.0 as i32 ..= search_size_mults.1 as i32 * size.0 as i32;
+    let dc_range = -(search_size_mults.0 as i32) * size.1 as i32 ..= search_size_mults.1 as i32 * size.1 as i32;
+
     let mut tilings: BTreeMap<BTreeMap<(i32, i32), (i32, i32)>, ((i32, i32), (i32, i32))> = Default::default();
-    for dr1 in 0..=2*size.0 as i32 {
-        for dc1 in 0..=2*size.1 as i32 {
-            for dr2 in 0..=2*size.0 as i32 {
-                'skip: for dc2 in 0..=2*size.1 as i32 {
+    for dr1 in dr_range.clone() {
+        for dc1 in dc_range.clone() {
+            for dr2 in dr_range.clone() {
+                'skip: for dc2 in dc_range.clone() {
                     let (b1, b2) = ((dr1, dc1), (dr2, dc2));
                     let mut res: BTreeMap<(i32, i32), (i32, i32)> = Default::default();
-                    for m1 in -TILE_RADIUS..=TILE_RADIUS {
-                        for m2 in -TILE_RADIUS..=TILE_RADIUS {
+                    for m1 in -tile_radius..=tile_radius {
+                        for m2 in -tile_radius..=tile_radius {
                             for (r, c) in shape.iter().copied() {
                                 let p = (r + m1 * b1.0 + m2 * b2.0, c + m1 * b1.1 + m2 * b2.1);
                                 if res.insert(p, (r, c)).is_some() { continue 'skip; }
@@ -262,6 +265,30 @@ fn get_tilings(shape: &BTreeSet<(i32, i32)>) -> Vec<(BTreeMap<(i32, i32), (i32, 
         }
     }
     tilings.into_iter().map(|(tiling, (b1, b2))| (tiling, b1, b2)).collect()
+}
+fn get_tilings(shape: &BTreeSet<(i32, i32)>) -> Vec<(BTreeMap<(i32, i32), (i32, i32)>, (i32, i32), (i32, i32))> {
+    get_tilings_impl(shape, (0, 2), 5)
+}
+
+#[test]
+fn test_get_tilings() {
+    macro_rules! check {
+        ($shape:expr => $search_size_mult:expr, $tile_radius:expr) => {{
+            let shape = $shape;
+            let a = get_tilings_impl(&shape, $search_size_mult, $tile_radius).into_iter().map(|x| x.0).collect::<BTreeSet<_>>();
+            let b = get_tilings(&shape).into_iter().map(|x| x.0).collect::<BTreeSet<_>>();
+            if a != b {
+                panic!("{} vs {}\n{shape:?}", a.len(), b.len());
+            }
+        }};
+    }
+
+    const N: (usize, usize) = (3, 3);
+    for size in 1..=N.0 * N.1 {
+        for shape in (0..N.0 as i32).cartesian_product(0..N.1 as i32).combinations(size).map(|x| x.into_iter().collect()) {
+            check!(shape => (2, 2), 6);
+        }
+    }
 }
 
 enum MergedSolver<'ctx> {
