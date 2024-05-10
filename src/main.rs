@@ -6,6 +6,7 @@ use std::fmt::{self, Write};
 use std::cmp::Ordering;
 use std::fs::File;
 use std::iter;
+use std::mem;
 use std::thread;
 use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicUsize, Ordering as MemOrder};
@@ -195,14 +196,43 @@ fn print_shape(shape: &BTreeSet<(i32, i32)>, detectors: &BTreeMap<(i32, i32), Ra
     }
 }
 
+struct Shells<'a, 'b, P: Point> {
+    expanded: BTreeSet<P>,
+    frontier: BTreeSet<P>,
+    adj: &'b Adj<'a, P>,
+}
+impl<'a, 'b, P: Point> Shells<'a, 'b, P> {
+    fn new(shape: &BTreeSet<P>, adj: &'b Adj<'a, P>) -> Self {
+        Self {
+            expanded: shape.clone(),
+            frontier: shape.clone(),
+            adj,
+        }
+    }
+}
+impl<'a, 'b, 'c, P: Point> Iterator for Shells<'a, 'b, P> {
+    type Item = BTreeSet<P>;
+    fn next(&mut self) -> Option<Self::Item> {
+        for p in mem::take(&mut self.frontier) {
+            self.frontier.extend((self.adj)(p).into_iter().filter(|q| !self.expanded.contains(q)));
+        }
+        self.expanded.extend(self.frontier.iter().copied());
+        Some(self.frontier.clone())
+    }
+}
+#[test]
+fn test_shells() {
+    let mut shells = Shells::new(&[(0,0)].into_iter().collect(), &adj_k);
+    assert_eq!(shells.next().unwrap().len(), 8);
+    assert_eq!(shells.next().unwrap().len(), 16);
+    assert_eq!(shells.next().unwrap().len(), 24);
+    assert_eq!(shells.next().unwrap().len(), 32);
+}
+
 fn inflate<P: Point>(shape: &BTreeSet<P>, adj: &Adj<P>, radius: usize) -> BTreeSet<P> {
     let mut res = shape.clone();
-    for _ in 0..radius {
-        let mut new_res = res.clone();
-        for p in res.iter().copied() {
-            new_res.append(&mut adj(p));
-        }
-        res = new_res;
+    for mut shell in Shells::new(shape, adj).take(radius) {
+        res.append(&mut shell);
     }
     res
 }
@@ -216,6 +246,7 @@ fn test_inflate() {
     assert_eq!(inflate(&[(0, 0)].into_iter().collect(), &adj_k, 1).len(), 9);
     assert_eq!(inflate(&[(0, 0)].into_iter().collect(), &adj_k, 2).len(), 25);
     assert_eq!(inflate(&[(0, 0)].into_iter().collect(), &adj_k, 3).len(), 49);
+    assert_eq!(inflate(&[(0, 0)].into_iter().collect(), &adj_k, 200).len(), 160801);
 
     assert_eq!(inflate(&(0..=35).map(|x| (x, 0)).collect(), &adj_k, 3).len(), 294);
     assert_eq!(inflate(&(0..=200).map(|x| (x, 0)).collect(), &adj_k, 3).len(), 1449);
@@ -228,30 +259,45 @@ struct Distances<P: Point>(BTreeMap<(P, P), usize>);
 impl<P: Point> Distances<P> {
     fn within_shape(shape: &BTreeSet<P>, adj: &Adj<P>) -> Self {
         let mut res = BTreeMap::default();
-        for points in shape.iter().combinations_with_replacement(2) {
-            let (p, q) = (*points[0], *points[1]);
-            let mut region = BTreeSet::new();
-            region.insert(p);
+        for p in shape.iter().copied() {
+            let mut targets: BTreeSet<_> = shape.range(p..).copied().skip(1).collect();
+            let mut shells = Shells::new(&[p].into_iter().collect(), adj);
             let mut dist = 0;
-            while !region.contains(&q) {
-                region = inflate(&region, adj, 1);
+            while !targets.is_empty() {
                 dist += 1;
+                for q in shells.next().unwrap() {
+                    if targets.remove(&q) {
+                        res.insert((p, q), dist);
+                    }
+                }
             }
-            res.insert((p, q), dist);
-            res.insert((q, p), dist);
         }
         Self(res)
     }
     fn get(&self, p: P, q: P) -> usize {
-        self.0[&(p, q)]
+        match p.cmp(&q) {
+            Ordering::Equal => 0,
+            Ordering::Less => self.0[&(p, q)],
+            Ordering::Greater => self.0[&(q, p)],
+        }
     }
 }
 #[test]
 fn test_distances() {
-    assert_eq!(Distances::within_shape(&[(0,0)].into_iter().collect(), &adj_k).0.len(), 1);
-    assert_eq!(Distances::within_shape(&[(0,0),(0,1)].into_iter().collect(), &adj_k).0.len(), 4);
+    assert_eq!(Distances::within_shape(&[(0,0)].into_iter().collect(), &adj_k).0, [].into_iter().collect());
+    assert_eq!(Distances::within_shape(&[(0,0),(0,1)].into_iter().collect(), &adj_k).0, [(((0,0),(0,1)),1)].into_iter().collect());
+    assert_eq!(Distances::within_shape(&[(0,0),(0,1),(0,2)].into_iter().collect(), &adj_k).0, [(((0,0),(0,1)),1), (((0,0),(0,2)),2), (((0,1),(0,2)),1)].into_iter().collect());
 
-    assert_eq!(Distances::within_shape(&(0..100).map(|x| (x, 0)).collect(), &adj_k).0.len(), 100 * 100);
+    assert_eq!(Distances::within_shape(&(0..100).map(|x| (x, 0)).collect(), &adj_k).0.len(), (100 * 100 - 100) / 2);
+    assert_eq!(Distances::within_shape(&(0..200).map(|x| (x, 0)).collect(), &adj_k).0.len(), (200 * 200 - 200) / 2);
+
+    let shape = (-20..=20).cartesian_product(-20..=20).into_iter().collect();
+    let d = Distances::within_shape(&shape, &adj_sq);
+    for p in shape.iter().copied() {
+        for q in shape.iter().copied() {
+            assert_eq!(d.get(p, q), (p.0 - q.0).abs() as usize + (p.1 - q.1).abs() as usize);
+        }
+    }
 }
 
 fn get_tilings_baseline_impl(shape: &BTreeSet<(i32, i32)>, search_size_mults: (u32, u32), tile_radius: i32) -> Vec<(BTreeMap<(i32, i32), (i32, i32)>, (i32, i32), (i32, i32))> {
