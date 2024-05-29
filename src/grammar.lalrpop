@@ -75,5 +75,5 @@ pub GraphExpr: GraphExpr = {
 GraphTerm: GraphExpr = {
     r"[pP][0-9]+" => GraphExpr::Path { size: <>[1..].parse().unwrap() },
     r"[cC][0-9]+" => GraphExpr::Cycle { size: <>[1..].parse().unwrap() },
-    r"file([^)]+)" => GraphExpr::File { path: <>[5..<>.len() - 1].to_owned() },
+    r"file\([^)]+\)" => GraphExpr::File { path: <>[5..<>.len() - 1].to_owned() },
 };
