@@ -599,7 +599,7 @@ impl FromStr for Param {
                 "red:ld"  | "red-ld"  | "redld"  => BasicParam { name: "RED:LD",  dom_kind: DomKind::Open,   disty_kind: DistyKind::Symmetric, dom: 2, disty: 2, add_self: true  },
                 "det:ld"  | "det-ld"  | "detld"  => BasicParam { name: "DET:LD",  dom_kind: DomKind::Open,   disty_kind: DistyKind::Sharp,     dom: 2, disty: 2, add_self: true  },
                 "err:ld"  | "err-ld"  | "errld"  => BasicParam { name: "ERR:LD",  dom_kind: DomKind::Open,   disty_kind: DistyKind::Symmetric, dom: 3, disty: 3, add_self: true  },
-                "sic"                            => BasicParam { name: "SIC",     dom_kind: DomKind::Closed, disty_kind: DistyKind::BiSharp,   dom: 2, disty: 1, add_self: false },
+                "sic"                            => BasicParam { name: "SIC",     dom_kind: DomKind::Closed, disty_kind: DistyKind::BiSharp,   dom: 1, disty: 1, add_self: false },
                 _ => return None,
             })
         }
