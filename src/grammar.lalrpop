@@ -15,18 +15,18 @@ pub BoolExpr: BoolExpr = {
     <right:NumericExpr> ">" <left:NumericExpr> => BoolExpr::Less { left: Box::new(left), right: Box::new(right) },
     <right:NumericExpr> ">=" <left:NumericExpr> => BoolExpr::LessEq { left: Box::new(left), right: Box::new(right) },
 
-    #[precedence(level = "1")]
-    "not" <BoolExpr> => BoolExpr::Not { value: Box::new(<>) },
-
     #[precedence(level = "2")]
-    #[assoc(side = "left")]
-    <left:BoolExpr> "and" <right:BoolExpr> => BoolExpr::And { left: Box::new(left), right: Box::new(right) },
+    "not" <BoolExpr> => BoolExpr::Not { value: Box::new(<>) },
 
     #[precedence(level = "3")]
     #[assoc(side = "left")]
-    <left:BoolExpr> "xor" <right:BoolExpr> => BoolExpr::Xor { left: Box::new(left), right: Box::new(right) },
+    <left:BoolExpr> "and" <right:BoolExpr> => BoolExpr::And { left: Box::new(left), right: Box::new(right) },
 
     #[precedence(level = "4")]
+    #[assoc(side = "left")]
+    <left:BoolExpr> "xor" <right:BoolExpr> => BoolExpr::Xor { left: Box::new(left), right: Box::new(right) },
+
+    #[precedence(level = "5")]
     #[assoc(side = "left")]
     <left:BoolExpr> "or" <right:BoolExpr> => BoolExpr::Or { left: Box::new(left), right: Box::new(right) },
 };
@@ -40,16 +40,16 @@ NumericExpr: NumericExpr = {
     #[precedence(level = "0")]
     NumericTerm => <>,
 
-    #[precedence(level = "0")]
+    #[precedence(level = "1")]
     "-" <value:NumericExpr> => NumericExpr::Neg { value: Box::new(value) },
     "+" <value:NumericExpr> => <>,
 
-    #[precedence(level = "1")]
+    #[precedence(level = "2")]
     #[assoc(side = "left")]
     <left:NumericExpr> "*" <right:NumericExpr> => NumericExpr::Mul { left: Box::new(left), right: Box::new(right) },
     <left:NumericExpr> "/" <right:NumericExpr> => NumericExpr::Div { left: Box::new(left), right: Box::new(right) },
 
-    #[precedence(level = "2")]
+    #[precedence(level = "3")]
     #[assoc(side = "left")]
     <left:NumericExpr> "+" <right:NumericExpr> => NumericExpr::Add { left: Box::new(left), right: Box::new(right) },
     <left:NumericExpr> "-" <right:NumericExpr> => NumericExpr::Sub { left: Box::new(left), right: Box::new(right) },

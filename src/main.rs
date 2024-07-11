@@ -567,9 +567,6 @@ impl Param {
         let mut r2: BTreeSet<P> = &regions.1 - &regions.0;
         if self.basic.add_self {
             r1.insert(p.0);
-            r1.insert(q.0);
-
-            r2.insert(p.0);
             r2.insert(q.0);
         }
         Some(match self.basic.disty_kind {
