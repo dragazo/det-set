@@ -60,6 +60,7 @@ enum NumericExpr {
 enum GraphExpr {
     Path { size: usize },
     Cycle { size: usize },
+    Complete { size: usize },
     File { path: String },
     CartesianProduct { left: Box<GraphExpr>, right: Box<GraphExpr> },
     KingCartesianProduct { left: Box<GraphExpr>, right: Box<GraphExpr> },
@@ -954,6 +955,7 @@ impl Graph {
         match expr {
             GraphExpr::Path { size } => Ok(Graph::by_adj(&(0..*size).collect::<Vec<_>>(), |&x| format!("{x}"), |&x, &y| x.abs_diff(y) == 1)),
             GraphExpr::Cycle { size } => Ok(Graph::by_adj(&(0..*size).collect::<Vec<_>>(), |&x| format!("{x}"), |&x, &y| x.abs_diff(y) == 1 || x.abs_diff(y) == *size - 1)),
+            GraphExpr::Complete { size } => Ok(Graph::by_adj(&(0..*size).collect::<Vec<_>>(), |&x| format!("{x}"), |_, _| true)),
             GraphExpr::File { path } => Graph::read(&mut BufReader::new(File::open(path).unwrap())),
             GraphExpr::CartesianProduct { left, right } => Ok(Graph::build(left)?.cartesian_product(&Graph::build(right)?)),
             GraphExpr::KingCartesianProduct { left, right } => Ok(Graph::build(left)?.king_cartesian_product(&Graph::build(right)?)),
