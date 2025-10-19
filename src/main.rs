@@ -360,6 +360,8 @@ fn get_tilings_fast_impl(shape: &BTreeSet<(i32, i32)>, search_size_mults: (u32, 
     let mut tilings: BTreeMap<BTreeMap<(i32, i32), (i32, i32)>, ((i32, i32), (i32, i32))> = Default::default();
     for b1 in basis_candidates.iter().copied() {
         'skip: for b2 in basis_candidates.iter().copied() {
+            if b1.0 * b2.1 - b1.1 * b2.0 != shape.len() as _ { continue }
+
             let mut res: BTreeMap<(i32, i32), (i32, i32)> = BTreeMap::new();
             for (r, c) in shape.iter().copied() {
                 for m1 in m_range.iter().copied() {
