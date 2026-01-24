@@ -151,8 +151,8 @@ fn rect(rows: usize, cols: usize) -> BTreeSet<(i32, i32)> {
     }
     res
 }
-fn get_size(shape: &BTreeSet<(i32, i32)>) -> (usize, usize) {
-    if shape.is_empty() { return (0, 0); }
+fn get_bounds(shape: &BTreeSet<(i32, i32)>) -> ((i32, i32), (usize, usize)) {
+    if shape.is_empty() { return ((0, 0), (0, 0)); }
 
     let (mut min_r, mut max_r) = (i32::MAX, i32::MIN);
     let (mut min_c, mut max_c) = (i32::MAX, i32::MIN);
@@ -162,22 +162,22 @@ fn get_size(shape: &BTreeSet<(i32, i32)>) -> (usize, usize) {
         min_c = min_c.min(c);
         max_c = max_c.max(c);
     }
-    ((max_r - min_r) as usize + 1, (max_c - min_c) as usize + 1)
+    ((min_r, min_c), ((max_r - min_r) as usize + 1, (max_c - min_c) as usize + 1))
 }
 #[test]
-fn test_get_size() {
+fn test_get_bounds() {
     for r in 0..16 {
         for c in 0..16 {
-            assert_eq!(get_size(&rect(r, c)), if r == 0 || c == 0 { (0, 0) } else { (r, c) });
+            assert_eq!(get_bounds(&rect(r, c)), if r == 0 || c == 0 { ((0, 0), (0, 0)) } else { ((0, 0), (r, c)) });
         }
     }
 }
 fn print_shape(shape: &BTreeSet<(i32, i32)>, detectors: &BTreeMap<(i32, i32), Rational64>) {
-    let (rows, cols) = get_size(shape);
+    let ((min_r, min_c), (rows, cols)) = get_bounds(shape);
     let mut table = vec![vec![String::new(); cols]; rows];
 
     for (r, c) in shape.iter().copied() {
-        table[r as usize][c as usize] = match detectors.get(&(r, c)).copied() {
+        table[(r - min_r) as usize][(c - min_c) as usize] = match detectors.get(&(r, c)).copied() {
             Some(v) => if *v.numer() == *v.denom() { '1'.into() } else if *v.numer() == 0 { '0'.into() } else { format!("({v})") },
             None => '.'.into(),
         };
@@ -236,9 +236,6 @@ fn inflate<P: Point>(shape: &BTreeSet<P>, adj: &Adj<P>, radius: usize) -> BTreeS
         res.append(&mut shell);
     }
     res
-}
-fn get_interior<P: Point>(shape: &BTreeSet<P>, adj: &Adj<P>) -> BTreeSet<P> {
-    shape.iter().copied().filter(|u| adj(*u).into_iter().all(|v| shape.contains(&v))).collect()
 }
 
 #[test]
@@ -303,7 +300,7 @@ fn test_distances() {
 
 fn get_tilings_baseline_impl(shape: &BTreeSet<(i32, i32)>, search_size_mults: (u32, u32), tile_radius: i32) -> Vec<(BTreeMap<(i32, i32), (i32, i32)>, (i32, i32), (i32, i32))> {
     let inflated = inflate(shape, &adj_k, 3);
-    let size = get_size(shape);
+    let size = get_bounds(shape).1;
 
     let dr_range = -(search_size_mults.0 as i32) * size.0 as i32 ..= search_size_mults.1 as i32 * size.0 as i32;
     let dc_range = -(search_size_mults.0 as i32) * size.1 as i32 ..= search_size_mults.1 as i32 * size.1 as i32;
@@ -336,7 +333,7 @@ fn get_tilings_baseline_impl(shape: &BTreeSet<(i32, i32)>, search_size_mults: (u
 }
 fn get_tilings_fast_impl(shape: &BTreeSet<(i32, i32)>, search_size_mults: (u32, u32), tile_radius: i32) -> Vec<(BTreeMap<(i32, i32), (i32, i32)>, (i32, i32), (i32, i32))> {
     let inflated = inflate(shape, &adj_k, 3);
-    let size = get_size(shape);
+    let size = get_bounds(shape).1;
 
     let dr_range = -(search_size_mults.0 as i32) * size.0 as i32 ..= search_size_mults.1 as i32 * size.0 as i32;
     let dc_range = -(search_size_mults.0 as i32) * size.1 as i32 ..= search_size_mults.1 as i32 * size.1 as i32;
