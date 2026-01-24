@@ -631,6 +631,28 @@ impl FromStr for Param {
     }
 }
 
+#[derive(Clone, Copy)]
+enum Bound {
+    Upper,
+    Lower,
+}
+impl Bound {
+    fn optimize<T: Ord>(&self, best: &mut Option<T>, new: T) -> bool {
+        let better = match best {
+            Some(best) => match (self, (*best).cmp(&new)) {
+                (Bound::Lower, Ordering::Less) => true,
+                (Bound::Upper, Ordering::Greater) => true,
+                _ => false,
+            }
+            None => true,
+        };
+        if better {
+            *best = Some(new);
+        }
+        better
+    }
+}
+
 fn test_graph(graph: &Graph, param: &Param, exhaustive: bool, log: bool, omit_isomorphic: bool, optimize: bool, constraint: &BoolExpr) -> Vec<BTreeMap<usize, Rational64>> {
     let petgraph_graph: petgraph::Graph<usize, ()> = {
         let mut g = petgraph::Graph::new();
@@ -798,107 +820,100 @@ fn test_graph(graph: &Graph, param: &Param, exhaustive: bool, log: bool, omit_is
 
     solutions
 }
-fn test_tiling(shape: &BTreeSet<(i32, i32)>, grid: &Grid, param: &Param, log: bool) -> Option<(BTreeMap<(i32, i32), Rational64>, (i32, i32), (i32, i32), usize)> {
+fn test_tiling(shape: &BTreeSet<(i32, i32)>, grid: &Grid, param: &Param, mode: Bound, log: bool) -> Option<(BTreeMap<(i32, i32), Rational64>, (i32, i32), (i32, i32), usize)> {
     if log {
         println!("tile shape:");
         print_shape(&shape, &Default::default());
     }
 
     let inflated = inflate(&shape, grid.adj, 2);
-    let interior = get_interior(&shape, grid.adj);
     let distances = Distances::within_shape(&inflated, grid.adj);
     let tilings = get_tilings(&shape);
 
     if log {
-        println!("\nfound {} tilings...", tilings.len());
-    }
-    if tilings.is_empty() {
-        return None;
+        print!("\nfound {} tilings...\ndetector sums:", tilings.len());
     }
 
-    let context = Context::new(&Default::default());
-    let verts: BTreeMap<(i32, i32), Real> = shape.iter().copied().map(|p| (p, Real::new_const(&context, format!("v{},{}", p.0, p.1)))).collect();
-    let tiling_index = Int::new_const(&context, "tidx");
+    let mut best = None;
+    for (i, (tiling, b1, b2)) in tilings.into_iter().enumerate() {
+        let context = Context::new(&Default::default());
+        let verts: BTreeMap<(i32, i32), Real> = shape.iter().copied().map(|p| (p, Real::new_const(&context, format!("v{},{}", p.0, p.1)))).collect();
 
-    let zero = Real::from_real(&context, 0, 1);
-    let one = Real::from_real(&context, 1, 1);
+        let zero = Real::from_real(&context, 0, 1);
+        let one = Real::from_real(&context, 1, 1);
 
-    let s = Optimize::new(&context);
-    s.minimize(&sum(&context, verts.values().cloned()));
-    if param.fractional {
-        s.minimize(&count(&context, verts.values().map(|x| x.gt(&zero))));
-    }
+        macro_rules! mapped {
+            ($p:expr) => { match mode { Bound::Upper => verts[&tiling[&$p]].clone(), Bound::Lower => verts.get(&$p).unwrap_or(&one).clone() } };
+        }
 
-    for (p, v) in verts.iter() {
-        match param.fractional {
-            true => s.assert(&(v.ge(&zero) & v.le(&one))),
-            false => {
-                let flag = Bool::new_const(&context, format!("v{},{}f", p.0, p.1)); // vastly faster than (v == 0 || v == 1)
-                s.assert(&v._eq(&flag.ite(&one, &zero)));
+        let s = Optimize::new(&context);
+        s.minimize(&sum(&context, verts.values().cloned()));
+        if param.fractional {
+            s.minimize(&count(&context, verts.values().map(|x| x.gt(&zero))));
+        }
+
+        for (p, v) in verts.iter() {
+            match param.fractional {
+                true => s.assert(&(v.ge(&zero) & v.le(&one))),
+                false => {
+                    let flag = Bool::new_const(&context, format!("v{},{}f", p.0, p.1)); // vastly faster than (v == 0 || v == 1)
+                    s.assert(&v._eq(&flag.ite(&one, &zero)));
+                }
             }
         }
-    }
 
-    let count_det = |points: &BTreeSet<(i32, i32)>, tiling: &BTreeMap<(i32, i32), (i32, i32)>| -> Real {
-        sum(&context, points.iter().map(|p| verts[&tiling[p]].clone()))
-    };
+        let counter: &Counter<(i32, i32)> = &|points: &BTreeSet<(i32, i32)>| sum(&context, points.iter().map(|p| mapped!(p)));
 
-    let identity_map = shape.iter().copied().map(|p| (p, p)).collect();
-    for p in interior.iter().copied() {
-        if let Some(req) = param.check_dom(&context, (p, &verts[&p]), &grid.adj, &|group| count_det(group, &identity_map)) {
-            s.assert(&req);
-        }
-    }
-    for pq in interior.iter().copied().combinations(2) {
-        let (p, q) = (pq[0], pq[1]);
-        if let Some(req) = param.check_disty(&context, (p, &verts[&p]), (q, &verts[&q]), &grid.adj, &distances, &|group| count_det(group, &identity_map)) {
-            s.assert(&req);
-        }
-    }
-    drop(identity_map);
-
-    let mut any_solution = Bool::from_bool(&context, false);
-    for (i, (tiling, _, _)) in tilings.iter().enumerate() {
         let mut solution = Bool::from_bool(&context, true);
         for p in inflated.iter().copied() {
-            if !interior.contains(&p) {
-                if let Some(req) = param.check_dom(&context, (p, &verts[&tiling[&p]]), &grid.adj, &|group| count_det(group, tiling)) {
-                    solution &= &req;
-                }
+            if let Some(req) = param.check_dom(&context, (p, &mapped!(p)), &grid.adj, counter) {
+                solution &= &req;
             }
         }
         for pq in inflated.iter().copied().combinations(2) {
             let (p, q) = (pq[0], pq[1]);
-            if !interior.contains(&p) || !interior.contains(&q) {
-                if let Some(req) = param.check_disty(&context, (p, &verts[&tiling[&p]]), (q, &verts[&tiling[&q]]), &grid.adj, &distances, &|group| count_det(group, tiling)) {
-                    solution &= &req;
-                }
+            if let Some(req) = param.check_disty(&context, (p, &mapped!(p)), (q, &mapped!(q)), &grid.adj, &distances, counter) {
+                solution &= &req;
             }
         }
-        solution &= tiling_index._eq(&Int::from_u64(&context, i as u64));
-        any_solution |= solution;
+        s.assert(&solution);
+
+        match s.check(&[]) {
+            SatResult::Sat => {
+                let model = s.get_model().unwrap();
+                let detectors: BTreeMap<(i32, i32), Rational64> = verts.iter().map(|(p, v)| (*p, model.eval(v, false).unwrap().as_real().unwrap())).map(|(p, v)| (p, Rational64::new(v.0, v.1))).collect();
+                let total: Rational64 = detectors.values().sum();
+                mode.optimize(&mut best, (total, (detectors, b1, b2, i)));
+
+                if log {
+                    print!(" {total}");
+                }
+            }
+            SatResult::Unsat => if log { print!(" N/A") },
+            SatResult::Unknown => unreachable!(),
+        }
+
+        match mode {
+            Bound::Lower => {
+                if log {
+                    print!(" (tiling-invariant)");
+                }
+                break;
+            }
+            Bound::Upper => (),
+        }
     }
-    s.assert(&any_solution);
 
     if log {
-        println!("checking {} tilings...\n", tilings.len());
+        print!("\n\n");
     }
 
-    match s.check(&[]) {
-        SatResult::Sat => {
-            let model = s.get_model().unwrap();
-            let detectors = verts.iter().map(|(p, v)| (*p, model.eval(v, false).unwrap().as_real().unwrap())).map(|(p, v)| (p, Rational64::new(v.0, v.1))).collect();
-            let tidx = model.eval(&tiling_index, false).unwrap().as_u64().unwrap() as usize;
-            Some((detectors, tilings[tidx].1, tilings[tidx].2, tidx))
-        }
-        SatResult::Unsat => None,
-        SatResult::Unknown => unreachable!(),
-    }
+    best.map(|x| x.1)
 }
-fn print_result(shape: &BTreeSet<(i32, i32)>, res: &Option<(BTreeMap<(i32, i32), Rational64>, (i32, i32), (i32, i32), usize)>) {
+fn print_result(shape: &BTreeSet<(i32, i32)>, res: &Option<(BTreeMap<(i32, i32), Rational64>, (i32, i32), (i32, i32), usize)>, mode: Bound) {
     match res {
         Some((detectors, b1, b2, tidx)) => {
-            println!("found minimum:");
+            println!("found {}:", match mode { Bound::Upper => "minimum", Bound::Lower => "maximum" });
             print_shape(&shape, detectors);
             let total = detectors.iter().map(|x| x.1).sum::<Rational64>();
             let value = total / Rational64::new(shape.len() as i64, 1);
@@ -1025,6 +1040,9 @@ enum Mode {
         param: Param,
         /// The type of infinite grid; e.g., k, sq, tri, etc.
         grid: Grid,
+        /// Compute theoretical lower bound instead upper bound solution
+        #[clap(short, long)]
+        lower: bool,
     },
     /// Minimum value for an unknown tiling on an infinite grid.
     Entropy {
@@ -1038,6 +1056,9 @@ enum Mode {
         param: Param,
         /// The type of infinite grid; e.g., k, sq, tri, etc.
         grid: Grid,
+        /// Compute theoretical lower bound instead upper bound solution
+        #[clap(short, long)]
+        lower: bool,
 
         /// The number of threads to use for iterating geometries.
         #[clap(short, long, default_value_t = NonZeroUsize::new(num_cpus::get()).unwrap())]
@@ -1074,12 +1095,15 @@ enum Mode {
 
 fn main() {
     match Mode::parse() {
-        Mode::Rect { rows, cols, grid, param } => {
+        Mode::Rect { rows, cols, grid, param, lower } => {
             let shape = rect(rows.get(), cols.get());
+            let mode = if lower { Bound::Lower } else { Bound::Upper };
             println!("checking {} {}\n", param.get_name(), grid.name);
-            print_result(&shape, &test_tiling(&shape, &grid, &param, true))
+            print_result(&shape, &test_tiling(&shape, &grid, &param, mode, true), mode)
         }
-        Mode::Entropy { rows, cols, size, grid, param, threads } => {
+        Mode::Entropy { rows, cols, size, grid, param, threads, lower } => {
+            let mode = if lower { Bound::Lower } else { Bound::Upper };
+
             let best_total = Arc::new(Mutex::new(None));
             let shapes = Arc::new(Mutex::new((0..rows.get() as i32).cartesian_product(0..cols.get() as i32).combinations(size.get()).map(|x| x.into_iter().collect::<BTreeSet<_>>()).fuse()));
             let shapes_total = Arc::new(AtomicUsize::new(0));
@@ -1094,13 +1118,12 @@ fn main() {
                         None => break,
                     };
                     shapes_total.fetch_add(1, MemOrder::Relaxed);
-                    if let Some(res) = test_tiling(&shape, &grid, &param, false) {
+                    if let Some(res) = test_tiling(&shape, &grid, &param, mode, false) {
                         let total: Rational64 = res.0.values().sum();
                         let mut best_total = best_total.lock().unwrap();
-                        if best_total.map(|x| total > x).unwrap_or(true) {
-                            *best_total = Some(total);
+                        if mode.optimize(&mut *best_total, total) {
                             println!("\nnew current best:");
-                            print_result(&shape, &Some(res));
+                            print_result(&shape, &Some(res), mode);
                         }
                     }
                 })
