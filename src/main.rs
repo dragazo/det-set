@@ -1099,7 +1099,12 @@ fn main() {
             let mode = if lower { Bound::Lower } else { Bound::Upper };
 
             let best_total = Arc::new(Mutex::new(None));
-            let shapes = Arc::new(Mutex::new((0..rows.get() as i32).cartesian_product(0..cols.get() as i32).combinations(size.get()).map(|x| x.into_iter().collect::<BTreeSet<_>>()).fuse()));
+            let shapes = Arc::new(Mutex::new(
+                (0..rows.get() as i32).cartesian_product(0..cols.get() as i32)
+                .combinations(size.get())
+                .map(|x| x.into_iter().collect::<BTreeSet<_>>())
+                .filter(|s| get_bounds(s).0 == (0, 0))
+                .fuse()));
             let shapes_total = Arc::new(AtomicUsize::new(0));
 
             let threads = (0..threads.get()).map(|_| {
