@@ -842,9 +842,7 @@ fn test_tiling(shape: &BTreeSet<(i32, i32)>, grid: &Grid, param: &Param, mode: B
         let zero = Real::from_real(&context, 0, 1);
         let one = Real::from_real(&context, 1, 1);
 
-        macro_rules! mapped {
-            ($p:expr) => { match mode { Bound::Upper => verts[&tiling[&$p]].clone(), Bound::Lower => verts.get(&$p).unwrap_or(&one).clone() } };
-        }
+        let value = |p: (i32, i32)| -> &Real { match mode { Bound::Upper => &verts[&tiling[&p]], Bound::Lower => verts.get(&p).unwrap_or(&one) } };
 
         let s = Optimize::new(&context);
         s.minimize(&sum(&context, verts.values().cloned()));
@@ -856,23 +854,23 @@ fn test_tiling(shape: &BTreeSet<(i32, i32)>, grid: &Grid, param: &Param, mode: B
             match param.fractional {
                 true => s.assert(&(v.ge(&zero) & v.le(&one))),
                 false => {
-                    let flag = Bool::new_const(&context, format!("v{},{}f", p.0, p.1)); // vastly faster than (v == 0 || v == 1)
+                    let flag = Bool::new_const(&context, format!("v{},{}f", p.0, p.1));
                     s.assert(&v._eq(&flag.ite(&one, &zero)));
                 }
             }
         }
 
-        let counter: &Counter<(i32, i32)> = &|points: &BTreeSet<(i32, i32)>| sum(&context, points.iter().map(|p| mapped!(p)));
+        let counter: &Counter<(i32, i32)> = &|points: &BTreeSet<(i32, i32)>| sum(&context, points.iter().map(|&p| value(p).clone()));
 
         let mut solution = Bool::from_bool(&context, true);
         for p in inflated.iter().copied() {
-            if let Some(req) = param.check_dom(&context, (p, &mapped!(p)), &grid.adj, counter) {
+            if let Some(req) = param.check_dom(&context, (p, value(p)), &grid.adj, counter) {
                 solution &= &req;
             }
         }
         for pq in inflated.iter().copied().combinations(2) {
             let (p, q) = (pq[0], pq[1]);
-            if let Some(req) = param.check_disty(&context, (p, &mapped!(p)), (q, &mapped!(q)), &grid.adj, &distances, counter) {
+            if let Some(req) = param.check_disty(&context, (p, value(p)), (q, value(q)), &grid.adj, &distances, counter) {
                 solution &= &req;
             }
         }
@@ -884,7 +882,6 @@ fn test_tiling(shape: &BTreeSet<(i32, i32)>, grid: &Grid, param: &Param, mode: B
                 let detectors: BTreeMap<(i32, i32), Rational64> = verts.iter().map(|(p, v)| (*p, model.eval(v, false).unwrap().as_real().unwrap())).map(|(p, v)| (p, Rational64::new(v.0, v.1))).collect();
                 let total: Rational64 = detectors.values().sum();
                 mode.optimize(&mut best, (total, (detectors, b1, b2, i)));
-
                 if log {
                     print!(" {total}");
                 }
