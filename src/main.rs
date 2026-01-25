@@ -183,7 +183,7 @@ fn print_shape(shape: &BTreeSet<(i32, i32)>, detectors: &BTreeMap<(i32, i32), Ra
         };
     }
 
-    let col_widths: Vec<_> = (0..cols).map(|c| table.iter().map(|row| row[c].len()).max().unwrap_or(0)).collect();
+    let col_widths: Vec<_> = (0..cols).map(|c| table.iter().map(|row| row[c].len()).max().unwrap_or(0).max(1)).collect();
 
     for row in table.iter() {
         for (value, &width) in iter::zip(row, &col_widths) {
