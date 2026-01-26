@@ -142,6 +142,19 @@ fn adj_hex(p: (i32, i32)) -> BTreeSet<(i32, i32)> {
     }
 }
 
+fn sym_fx(shape: &BTreeSet<(i32, i32)>) -> BTreeSet<(i32, i32)> {
+    shape.iter().map(|&p| (-p.0, p.1)).collect()
+}
+fn sym_r90(shape: &BTreeSet<(i32, i32)>) -> BTreeSet<(i32, i32)> {
+    shape.iter().map(|&p| (p.1, -p.0)).collect()
+}
+
+#[test]
+fn test_sym() {
+    assert_eq!(sym_fx(&[(1, 1), (2, 0)].into_iter().collect()), [(-1, 1), (-2, 0)].into_iter().collect());
+    assert_eq!(sym_r90(&[(1, 1), (1, 2), (2, 2)].into_iter().collect()), [(1, -1), (2, -1), (2, -2)].into_iter().collect());
+}
+
 fn rect(rows: usize, cols: usize) -> BTreeSet<(i32, i32)> {
     let mut res = BTreeSet::new();
     for r in 0..rows as i32 {
@@ -151,6 +164,7 @@ fn rect(rows: usize, cols: usize) -> BTreeSet<(i32, i32)> {
     }
     res
 }
+
 fn get_bounds(shape: &BTreeSet<(i32, i32)>) -> ((i32, i32), (usize, usize)) {
     if shape.is_empty() { return ((0, 0), (0, 0)); }
 
@@ -172,6 +186,17 @@ fn test_get_bounds() {
         }
     }
 }
+
+fn normalize(shape: &BTreeSet<(i32, i32)>) -> BTreeSet<(i32, i32)> {
+    let (min_r, min_c) = get_bounds(shape).0;
+    shape.iter().map(|&(r, c)| (r - min_r, c - min_c)).collect()
+}
+#[test]
+fn test_normalize() {
+    assert_eq!(normalize(&[(1, 1), (2, 0)].into_iter().collect()), [(0, 1), (1, 0)].into_iter().collect());
+    assert_eq!(normalize(&[(1, 1), (2, 2)].into_iter().collect()), [(0, 0), (1, 1)].into_iter().collect());
+}
+
 fn print_shape(shape: &BTreeSet<(i32, i32)>, detectors: &BTreeMap<(i32, i32), Rational64>) {
     let ((min_r, min_c), (rows, cols)) = get_bounds(shape);
     let mut table = vec![vec![String::new(); cols]; rows];
@@ -487,15 +512,26 @@ fn build_bool_expr<'ctx, P: Point>(context: &(&'ctx Context, &BTreeMap<&str, P>,
 struct Grid {
     name: &'static str,
     adj: &'static Adj<'static, (i32, i32)>,
+    symmetries: &'static [fn (&BTreeSet<(i32, i32)>) -> BTreeSet<(i32, i32)>],
+}
+impl Grid {
+    fn is_canonical(&self, shape: &BTreeSet<(i32, i32)>) -> bool {
+        std::iter::once(shape.clone()).chain(self.symmetries.iter().map(|s| s(&shape))).map(|s| normalize(&s)).collect::<BTreeSet<_>>().first().unwrap() == shape
+    }
 }
 impl FromStr for Grid {
     type Err = String;
     fn from_str(s: &str) -> Result<Self, String> {
+        macro_rules! s {
+            ($($($f:ident)+)|+) => { [$( |s: &BTreeSet<(i32, i32)>| -> BTreeSet<(i32, i32)> { $(let s = s!(@$f)(&s);)+ s } ),+] };
+            (@r) => { sym_r90 };
+            (@f) => { sym_fx };
+        }
         Ok(match s.trim().to_lowercase().as_str() {
-            "k" | "king"    => Grid { name: "K",   adj: &adj_k   },
-            "sq" | "square" => Grid { name: "SQ",  adj: &adj_sq  },
-            "tri"           => Grid { name: "TRI", adj: &adj_tri },
-            "hex"           => Grid { name: "HEX", adj: &adj_hex },
+            "k" | "king"    => Grid { name: "K",   adj: &adj_k,   symmetries: &s!(r | r r | r r r | f | f r | f r r | f r r r) },
+            "sq" | "square" => Grid { name: "SQ",  adj: &adj_sq,  symmetries: &s!(r | r r | r r r | f | f r | f r r | f r r r) },
+            "tri"           => Grid { name: "TRI", adj: &adj_tri, symmetries: &[] },
+            "hex"           => Grid { name: "HEX", adj: &adj_hex, symmetries: &[] },
             _ => return Err(format!("unknown grid type: '{}'", s)),
         })
     }
@@ -1103,7 +1139,6 @@ fn main() {
                 (0..rows.get() as i32).cartesian_product(0..cols.get() as i32)
                 .combinations(size.get())
                 .map(|x| x.into_iter().collect::<BTreeSet<_>>())
-                .filter(|s| get_bounds(s).0 == (0, 0))
                 .fuse()));
             let shapes_total = Arc::new(AtomicUsize::new(0));
 
@@ -1116,6 +1151,7 @@ fn main() {
                         Some(x) => x,
                         None => break,
                     };
+                    if !grid.is_canonical(&shape) { continue }
                     shapes_total.fetch_add(1, MemOrder::Relaxed);
                     if let Some(res) = test_tiling(&shape, &grid, &param, mode, false) {
                         let total: Rational64 = res.0.values().sum();
