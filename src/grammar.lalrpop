@@ -94,4 +94,5 @@ pub ShapeExpr: ShapeExpr = {
 ShapeTerm: ShapeExpr = {
     r"[rR][0-9]+[xX][0-9]+" => { let p = <>.find('x').unwrap(); ShapeExpr::Rect { rows: <>[1..p].parse().unwrap(), cols: <>[p + 1..].parse().unwrap() } },
     r"[dD][0-9]+" => ShapeExpr::Diamond { radius: <>[1..].parse().unwrap() },
+    r"[bB][0-9]+" => ShapeExpr::Ball { radius: <>[1..].parse().unwrap() },
 };

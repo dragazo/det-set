@@ -69,12 +69,13 @@ enum GraphExpr {
 enum ShapeExpr {
     Rect { rows: usize, cols: usize },
     Diamond { radius: usize },
+    Ball { radius: usize },
     Intersect { left: Box<ShapeExpr>, right: Box<ShapeExpr> },
     Union { left: Box<ShapeExpr>, right: Box<ShapeExpr> },
 }
 
 impl ShapeExpr {
-    fn generate(&self) -> BTreeSet<(i32, i32)> {
+    fn generate(&self, grid: &Grid) -> BTreeSet<(i32, i32)> {
         match self {
             ShapeExpr::Rect { rows, cols } => {
                 let (mr, mc) = (-(*rows as i32 / 2), -(*cols as i32 / 2));
@@ -97,8 +98,9 @@ impl ShapeExpr {
                 }
                 res
             }
-            ShapeExpr::Intersect { left, right } => left.generate().intersection(&right.generate()).copied().collect(),
-            ShapeExpr::Union { left, right } => left.generate().union(&right.generate()).copied().collect(),
+            ShapeExpr::Ball { radius } => inflate(&std::iter::once((0, 0)).collect(), grid.adj, *radius),
+            ShapeExpr::Intersect { left, right } => left.generate(grid).intersection(&right.generate(grid)).copied().collect(),
+            ShapeExpr::Union { left, right } => left.generate(grid).union(&right.generate(grid)).copied().collect(),
         }
     }
 }
@@ -209,7 +211,8 @@ fn get_bounds(shape: &BTreeSet<(i32, i32)>) -> ((i32, i32), (usize, usize)) {
 fn test_get_bounds() {
     for r in 0..16 {
         for c in 0..16 {
-            assert_eq!(get_bounds(&ShapeExpr::Rect { rows: r, cols: c }.generate()), if r == 0 || c == 0 { ((0, 0), (0, 0)) } else { ((0, 0), (r, c)) });
+            let shape: BTreeSet<_> = (0..r as i32).cartesian_product(0..c as i32).collect();
+            assert_eq!(get_bounds(&shape), if r == 0 || c == 0 { ((0, 0), (0, 0)) } else { ((0, 0), (r, c)) });
         }
     }
 }
@@ -1221,7 +1224,7 @@ enum Mode {
 fn main() {
     match Mode::parse() {
         Mode::Share { shape, param, grid, entropy, threads } => {
-            let shape = grammar::ShapeExprParser::new().parse(&shape).unwrap().generate();
+            let shape = grammar::ShapeExprParser::new().parse(&shape).unwrap().generate(&grid);
             let entropy = entropy.map(|x| x.get()).unwrap_or(shape.len());
 
             println!("entropy boundary (size {}):", shape.len());
@@ -1266,7 +1269,7 @@ fn main() {
             println!("\ntested {} geometries", shapes_total.load(MemOrder::Relaxed));
         }
         Mode::Tile { shape, param, grid, entropy, threads, lower } => {
-            let shape = grammar::ShapeExprParser::new().parse(&shape).unwrap().generate();
+            let shape = grammar::ShapeExprParser::new().parse(&shape).unwrap().generate(&grid);
             let entropy = entropy.map(|x| x.get()).unwrap_or(shape.len());
             let mode = if lower { Bound::Lower } else { Bound::Upper };
 
