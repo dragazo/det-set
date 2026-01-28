@@ -900,6 +900,8 @@ fn test_tiling(shape: &BTreeSet<(i32, i32)>, grid: &Grid, param: &Param, mode: B
     for (i, (tiling, b1, b2)) in tilings.into_iter().enumerate() {
         let context = Context::new(&Default::default());
         let verts: BTreeMap<(i32, i32), Real> = shape.iter().map(|&p| (p, Real::new_const(&context, format!("v{},{}", p.0, p.1)))).collect();
+        let vert_sum = Real::new_const(&context, "vsum");
+        let det_count = Int::new_const(&context, "dcnt");
 
         let zero = Real::from_real(&context, 0, 1);
         let one = Real::from_real(&context, 1, 1);
@@ -908,9 +910,11 @@ fn test_tiling(shape: &BTreeSet<(i32, i32)>, grid: &Grid, param: &Param, mode: B
         let counter: &Counter<(i32, i32)> = &|points: &BTreeSet<(i32, i32)>| sum(&context, points.iter().map(|&p| value(p).clone()));
 
         let s = Optimize::new(&context);
-        s.minimize(&sum(&context, verts.values().cloned()));
+        s.assert(&vert_sum._eq(&sum(&context, verts.values().cloned())));
+        s.minimize(&vert_sum);
         if param.fractional {
-            s.minimize(&count(&context, verts.values().map(|x| x.gt(&zero))));
+            s.assert(&det_count._eq(&count(&context, verts.values().map(|x| x.gt(&zero)))));
+            s.minimize(&det_count);
         }
 
         for (p, v) in verts.iter() {
@@ -1162,8 +1166,14 @@ enum Mode {
         param: Param,
         /// The type of infinite grid; e.g., k, sq, tri, etc.
         grid: Grid,
+        /// Entropy size to use (omit to use full shape).
+        #[clap(short, long)]
+        entropy: Option<NonZeroUsize>,
+        /// The number of threads to use for iterating geometries.
+        #[clap(short, long, default_value_t = NonZeroUsize::new(num_cpus::get()).unwrap())]
+        threads: NonZeroUsize,
     },
-    /// Minimum value for a rectangular tiling on an infinite grid.
+    /// Bounds for a tiled solution on an infinite grid.
     Tile {
         /// The shape expression to operate on.
         /// This supports the syntax r<rows>x<cols> for rectangles and d<radius> for diamonds.
@@ -1173,29 +1183,15 @@ enum Mode {
         param: Param,
         /// The type of infinite grid; e.g., k, sq, tri, etc.
         grid: Grid,
-        /// Compute theoretical lower bound instead upper bound solution
+        /// Entropy size to use (omit to use full shape).
         #[clap(short, long)]
-        lower: bool,
-    },
-    /// Minimum value for an unknown tiling on an infinite grid.
-    Entropy {
-        /// The shape expression to operate on.
-        /// This supports the syntax r<rows>x<cols> for rectangles and d<radius> for diamonds.
-        /// The `& | ^ -` operators can be used to perform masking.
-        shape: String,
-        /// The size of the enclosed tile whose shape is unknown.
-        size: NonZeroUsize,
-        ///Tje graph parameter to check; e.g., old, ic, red:old, red:ic, etc.
-        param: Param,
-        /// The type of infinite grid; e.g., k, sq, tri, etc.
-        grid: Grid,
-        /// Compute theoretical lower bound instead upper bound solution
-        #[clap(short, long)]
-        lower: bool,
-
+        entropy: Option<NonZeroUsize>,
         /// The number of threads to use for iterating geometries.
         #[clap(short, long, default_value_t = NonZeroUsize::new(num_cpus::get()).unwrap())]
         threads: NonZeroUsize,
+        /// Compute theoretical lower bound instead upper bound solution
+        #[clap(short, long)]
+        lower: bool,
     },
     /// Minimum value for a finite graph.
     Graph {
@@ -1207,19 +1203,15 @@ enum Mode {
         graph: String,
         /// The graph parameter to check; e.g., old, ic, red:old, red:ic, etc.
         param: Param,
-
         /// Exhaustively generate all solutions
         #[clap(short, long)]
         all: bool,
-
         /// Include isomorphic solutions in output
         #[clap(long)]
         include_iso: bool,
-
         /// Make the solver output only optimal solutions
         #[clap(long)]
         include_suboptimal: bool,
-
         /// Extra constraint on output solutions
         #[clap(long, default_value_t = String::from("true"))]
         constraint: String,
@@ -1228,43 +1220,69 @@ enum Mode {
 
 fn main() {
     match Mode::parse() {
-        Mode::Share { shape, param, grid } => {
+        Mode::Share { shape, param, grid, entropy, threads } => {
             let shape = grammar::ShapeExprParser::new().parse(&shape).unwrap().generate();
-            println!("averaging boundary:");
-            print_shape(&shape, &Default::default());
-            println!();
-            match test_share(&shape, &grid, &param) {
-                Some((detectors, avg_sh)) => {
-                    println!("found maximum:");
-                    print_shape(&detectors.keys().copied().collect(), &detectors);
-                    println!("\naverage share: {avg_sh} ({})", *avg_sh.numer() as f64 / *avg_sh.denom() as f64);
-                    println!("lower bound:   {} ({})", avg_sh.recip(), *avg_sh.denom() as f64 / *avg_sh.numer() as f64);
-                }
-                None => println!("no solution"),
-            }
-        }
-        Mode::Tile { shape, grid, param, lower } => {
-            let shape = grammar::ShapeExprParser::new().parse(&shape).unwrap().generate();
-            let mode = if lower { Bound::Lower } else { Bound::Upper };
+            let entropy = entropy.map(|x| x.get()).unwrap_or(shape.len());
 
-            println!("checking {} {}\n", param.get_name(), grid.name);
-            print_result(&shape, &test_tiling(&shape, &grid, &param, mode, true), mode)
+            println!("entropy boundary (size {}):", shape.len());
+            print_shape(&shape, &Default::default());
+
+            let current_best: Arc<Mutex<Option<Rational64>>> = Arc::new(Mutex::new(None));
+            let shapes = Arc::new(Mutex::new(shape.into_iter().combinations(entropy).map(|x| x.into_iter().collect::<BTreeSet<_>>()).fuse()));
+            let shapes_total = Arc::new(AtomicUsize::new(0));
+            let explored_shapes = Arc::new(Mutex::new(BTreeSet::new()));
+
+            let threads = (0..threads.get()).map(|_| {
+                let current_best = current_best.clone();
+                let shapes = shapes.clone();
+                let shapes_total = shapes_total.clone();
+                let explored_shapes = explored_shapes.clone();
+                std::thread::spawn(move || loop {
+                    let shape = match shapes.lock().unwrap().next() {
+                        Some(x) => x,
+                        None => break,
+                    };
+                    let shape = normalize(&shape);
+                    if !grid.is_canonical(&shape) { continue }
+                    if !explored_shapes.lock().unwrap().insert(shape.clone()) { continue }
+                    shapes_total.fetch_add(1, MemOrder::Relaxed);
+                    if let Some(res) = test_share(&shape, &grid, &param) {
+                        let mut current_best = current_best.lock().unwrap();
+                        if current_best.as_ref().map(|x| res.1 > *x).unwrap_or(true) {
+                            println!("\nnew current max average share: {} -> bound {} ({})", res.1, res.1.recip(), *res.1.denom() as f64 / *res.1.numer() as f64);
+                            println!("averaging region:");
+                            print_shape(&shape, &Default::default());
+                            println!("solution:");
+                            print_shape(&res.0.keys().copied().collect(), &res.0);
+                            *current_best = Some(res.1);
+                        }
+                    }
+                })
+            }).collect::<Vec<_>>();
+            for thread in threads {
+                thread.join().unwrap();
+            }
+
+            println!("\ntested {} geometries", shapes_total.load(MemOrder::Relaxed));
         }
-        Mode::Entropy { shape, size, grid, param, threads, lower } => {
+        Mode::Tile { shape, param, grid, entropy, threads, lower } => {
             let shape = grammar::ShapeExprParser::new().parse(&shape).unwrap().generate();
+            let entropy = entropy.map(|x| x.get()).unwrap_or(shape.len());
             let mode = if lower { Bound::Lower } else { Bound::Upper };
 
             println!("entropy boundary (size {}):", shape.len());
             print_shape(&shape, &Default::default());
 
-            let best_total = Arc::new(Mutex::new(None));
-            let shapes = Arc::new(Mutex::new(shape.into_iter().combinations(size.get()).map(|x| x.into_iter().collect::<BTreeSet<_>>()).fuse()));
+            let current_best: Arc<Mutex<Option<Rational64>>> = Arc::new(Mutex::new(None));
+            let shapes = Arc::new(Mutex::new(shape.into_iter().combinations(entropy).map(|x| x.into_iter().collect::<BTreeSet<_>>()).fuse()));
             let shapes_total = Arc::new(AtomicUsize::new(0));
+            let explored_shapes = Arc::new(Mutex::new(BTreeSet::new()));
 
             let threads = (0..threads.get()).map(|_| {
-                let best_total = best_total.clone();
+                let current_best = current_best.clone();
                 let shapes = shapes.clone();
                 let shapes_total = shapes_total.clone();
+                let explored_shapes = explored_shapes.clone();
                 thread::spawn(move || loop {
                     let shape = match shapes.lock().unwrap().next() {
                         Some(x) => x,
@@ -1272,11 +1290,12 @@ fn main() {
                     };
                     let shape = normalize(&shape);
                     if !grid.is_canonical(&shape) { continue }
+                    if !explored_shapes.lock().unwrap().insert(shape.clone()) { continue }
                     shapes_total.fetch_add(1, MemOrder::Relaxed);
                     if let Some(res) = test_tiling(&shape, &grid, &param, mode, false) {
                         let total: Rational64 = res.0.values().sum();
-                        let mut best_total = best_total.lock().unwrap();
-                        if mode.optimize(&mut *best_total, total) {
+                        let mut current_best = current_best.lock().unwrap();
+                        if mode.optimize(&mut *current_best, total) {
                             println!("\nnew current best:");
                             print_result(&shape, &Some(res), mode);
                         }
