@@ -19,6 +19,7 @@
         "mults",
         "numer",
         "petgraph",
+        "recip",
         "satisfiability",
         "theo"
     ]

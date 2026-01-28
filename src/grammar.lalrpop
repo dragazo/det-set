@@ -1,4 +1,4 @@
-use super::{NumericExpr, BoolExpr, GraphExpr, Rational64};
+use super::{NumericExpr, BoolExpr, GraphExpr, ShapeExpr, Rational64};
 
 grammar;
 
@@ -77,4 +77,21 @@ GraphTerm: GraphExpr = {
     r"[cC][0-9]+" => GraphExpr::Cycle { size: <>[1..].parse().unwrap() },
     r"[kK][0-9]+" => GraphExpr::Complete { size: <>[1..].parse().unwrap() },
     r"file\([^)]+\)" => GraphExpr::File { path: <>[5..<>.len() - 1].to_owned() },
+};
+
+pub ShapeExpr: ShapeExpr = {
+    #[precedence(level = "0")]
+    ShapeTerm => <>,
+
+    #[precedence(level = "1")]
+    #[assoc(side = "left")]
+    <left:ShapeExpr> "&" <right:ShapeExpr> => ShapeExpr::Intersect { left: Box::new(left), right: Box::new(right) },
+
+    #[precedence(level = "2")]
+    #[assoc(side = "left")]
+    <left:ShapeExpr> "|" <right:ShapeExpr> => ShapeExpr::Union { left: Box::new(left), right: Box::new(right) },
+};
+ShapeTerm: ShapeExpr = {
+    r"[rR][0-9]+[xX][0-9]+" => { let p = <>.find('x').unwrap(); ShapeExpr::Rect { rows: <>[1..p].parse().unwrap(), cols: <>[p + 1..].parse().unwrap() } },
+    r"[dD][0-9]+" => ShapeExpr::Diamond { radius: <>[1..].parse().unwrap() },
 };

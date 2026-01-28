@@ -65,6 +65,43 @@ enum GraphExpr {
     CartesianProduct { left: Box<GraphExpr>, right: Box<GraphExpr> },
     KingCartesianProduct { left: Box<GraphExpr>, right: Box<GraphExpr> },
 }
+#[derive(Debug)]
+enum ShapeExpr {
+    Rect { rows: usize, cols: usize },
+    Diamond { radius: usize },
+    Intersect { left: Box<ShapeExpr>, right: Box<ShapeExpr> },
+    Union { left: Box<ShapeExpr>, right: Box<ShapeExpr> },
+}
+
+impl ShapeExpr {
+    fn generate(&self) -> BTreeSet<(i32, i32)> {
+        match self {
+            ShapeExpr::Rect { rows, cols } => {
+                let (mr, mc) = (-(*rows as i32 / 2), -(*cols as i32 / 2));
+                let mut res = BTreeSet::new();
+                for r in mr .. mr + *rows as i32 {
+                    for c in mc .. mc + *cols as i32 {
+                        res.insert((r, c));
+                    }
+                }
+                res
+            }
+            ShapeExpr::Diamond { radius } => {
+                let mut res = BTreeSet::new();
+                for r in -(*radius as i32) ..= *radius as i32 {
+                    for c in -(*radius as i32) ..= *radius as i32 {
+                        if r.abs() + c.abs() <= *radius as i32 {
+                            res.insert((r, c));
+                        }
+                    }
+                }
+                res
+            }
+            ShapeExpr::Intersect { left, right } => left.generate().intersection(&right.generate()).copied().collect(),
+            ShapeExpr::Union { left, right } => left.generate().union(&right.generate()).copied().collect(),
+        }
+    }
+}
 
 impl fmt::Display for BoolExpr {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -155,16 +192,6 @@ fn test_sym() {
     assert_eq!(sym_r90(&[(1, 1), (1, 2), (2, 2)].into_iter().collect()), [(1, -1), (2, -1), (2, -2)].into_iter().collect());
 }
 
-fn rect(rows: usize, cols: usize) -> BTreeSet<(i32, i32)> {
-    let mut res = BTreeSet::new();
-    for r in 0..rows as i32 {
-        for c in 0..cols as i32 {
-            res.insert((r, c));
-        }
-    }
-    res
-}
-
 fn get_bounds(shape: &BTreeSet<(i32, i32)>) -> ((i32, i32), (usize, usize)) {
     if shape.is_empty() { return ((0, 0), (0, 0)); }
 
@@ -182,7 +209,7 @@ fn get_bounds(shape: &BTreeSet<(i32, i32)>) -> ((i32, i32), (usize, usize)) {
 fn test_get_bounds() {
     for r in 0..16 {
         for c in 0..16 {
-            assert_eq!(get_bounds(&rect(r, c)), if r == 0 || c == 0 { ((0, 0), (0, 0)) } else { ((0, 0), (r, c)) });
+            assert_eq!(get_bounds(&ShapeExpr::Rect { rows: r, cols: c }.generate()), if r == 0 || c == 0 { ((0, 0), (0, 0)) } else { ((0, 0), (r, c)) });
         }
     }
 }
@@ -323,6 +350,7 @@ fn test_distances() {
     }
 }
 
+#[cfg(test)]
 fn get_tilings_baseline_impl(shape: &BTreeSet<(i32, i32)>, search_size_mults: (u32, u32), tile_radius: i32) -> Vec<(BTreeMap<(i32, i32), (i32, i32)>, (i32, i32), (i32, i32))> {
     let inflated = inflate(shape, &adj_k, 3);
     let size = get_bounds(shape).1;
@@ -732,7 +760,7 @@ fn test_graph(graph: &Graph, param: &Param, exhaustive: bool, log: bool, omit_is
         match param.fractional {
             true => s.assert(&(v.ge(&zero) & v.le(&one))),
             false => {
-                let flag = Bool::new_const(&context, format!("v{i}f")); // vastly faster than (v == 0 || v == 1)
+                let flag = Bool::new_const(&context, format!("v{i}f"));
                 s.assert(&v._eq(&flag.ite(&one, &zero)));
             }
         }
@@ -853,6 +881,7 @@ fn test_graph(graph: &Graph, param: &Param, exhaustive: bool, log: bool, omit_is
 
     solutions
 }
+
 fn test_tiling(shape: &BTreeSet<(i32, i32)>, grid: &Grid, param: &Param, mode: Bound, log: bool) -> Option<(BTreeMap<(i32, i32), Rational64>, (i32, i32), (i32, i32), usize)> {
     if log {
         println!("tile shape:");
@@ -861,21 +890,22 @@ fn test_tiling(shape: &BTreeSet<(i32, i32)>, grid: &Grid, param: &Param, mode: B
 
     let inflated = inflate(&shape, grid.adj, 2);
     let distances = Distances::within_shape(&inflated, grid.adj);
-    let tilings = get_tilings(&shape);
+    let tilings = match mode { Bound::Upper => get_tilings(&shape), Bound::Lower => vec![(shape.iter().map(|&p| (p, p)).collect(), (0, 0), (0, 0))] };
 
     if log {
-        print!("\nfound {} tilings...\ndetector sums:", tilings.len());
+        print!("\ngenerated {} tilings...\ndetector sums:", tilings.len());
     }
 
     let mut best = None;
     for (i, (tiling, b1, b2)) in tilings.into_iter().enumerate() {
         let context = Context::new(&Default::default());
-        let verts: BTreeMap<(i32, i32), Real> = shape.iter().copied().map(|p| (p, Real::new_const(&context, format!("v{},{}", p.0, p.1)))).collect();
+        let verts: BTreeMap<(i32, i32), Real> = shape.iter().map(|&p| (p, Real::new_const(&context, format!("v{},{}", p.0, p.1)))).collect();
 
         let zero = Real::from_real(&context, 0, 1);
         let one = Real::from_real(&context, 1, 1);
 
         let value = |p: (i32, i32)| -> &Real { match mode { Bound::Upper => &verts[&tiling[&p]], Bound::Lower => verts.get(&p).unwrap_or(&one) } };
+        let counter: &Counter<(i32, i32)> = &|points: &BTreeSet<(i32, i32)>| sum(&context, points.iter().map(|&p| value(p).clone()));
 
         let s = Optimize::new(&context);
         s.minimize(&sum(&context, verts.values().cloned()));
@@ -893,7 +923,6 @@ fn test_tiling(shape: &BTreeSet<(i32, i32)>, grid: &Grid, param: &Param, mode: B
             }
         }
 
-        let counter: &Counter<(i32, i32)> = &|points: &BTreeSet<(i32, i32)>| sum(&context, points.iter().map(|&p| value(p).clone()));
 
         let mut solution = Bool::from_bool(&context, true);
         for p in inflated.iter().copied() {
@@ -940,6 +969,69 @@ fn test_tiling(shape: &BTreeSet<(i32, i32)>, grid: &Grid, param: &Param, mode: B
 
     best.map(|x| x.1)
 }
+
+fn test_share(shape: &BTreeSet<(i32, i32)>, grid: &Grid, param: &Param) -> Option<(BTreeMap<(i32, i32), Rational64>, Rational64)> {
+    let inflated = inflate(&shape, grid.adj, 2);
+    let distances = Distances::within_shape(&inflated, grid.adj);
+
+    let context = Context::new(&Default::default());
+    let verts: BTreeMap<(i32, i32), Real> = inflated.iter().map(|&p| (p, Real::new_const(&context, format!("v{},{}", p.0, p.1)))).collect();
+    let sum_sh: Real = Real::new_const(&context, "ssh");
+    let sum_det: Real = Real::new_const(&context, "sdet");
+    let avg_sh: Real = Real::new_const(&context, "avgsh");
+
+    let zero = Real::from_real(&context, 0, 1);
+    let one = Real::from_real(&context, 1, 1);
+
+    let value = |p: (i32, i32)| -> &Real { verts.get(&p).unwrap_or(&one) };
+    let counter: &Counter<(i32, i32)> = &|points: &BTreeSet<(i32, i32)>| sum(&context, points.iter().map(|&p| value(p).clone()));
+
+    let dom = |p: (i32, i32)| -> Real { counter(&param.dom_region(p, grid.adj)) };
+    let sh = |p: (i32, i32)| -> Real { sum(&context, param.dom_region(p, grid.adj).into_iter().map(|q| value(p) / &dom(q))) };
+
+    let s = Optimize::new(&context);
+    s.assert(&sum_sh._eq(&sum(&context, shape.iter().map(|&p| sh(p)))));
+    s.assert(&sum_det._eq(&sum(&context, shape.iter().map(|p| verts[p].clone()))));
+    s.assert(&sum_det.gt(&zero));
+    s.assert(&avg_sh._eq(&(&sum_sh / &sum_det)));
+    s.maximize(&avg_sh);
+
+    for (p, v) in verts.iter() {
+        match param.fractional {
+            true => s.assert(&(v.ge(&zero) & v.le(&one))),
+            false => {
+                let flag = Bool::new_const(&context, format!("v{},{}f", p.0, p.1));
+                s.assert(&v._eq(&flag.ite(&one, &zero)));
+            }
+        }
+    }
+
+    let mut solution = Bool::from_bool(&context, true);
+    for p in inflated.iter().copied() {
+        if let Some(req) = param.check_dom(&context, (p, value(p)), &grid.adj, counter) {
+            solution &= &req;
+        }
+    }
+    for pq in inflated.iter().copied().combinations(2) {
+        let (p, q) = (pq[0], pq[1]);
+        if let Some(req) = param.check_disty(&context, (p, value(p)), (q, value(q)), &grid.adj, &distances, counter) {
+            solution &= &req;
+        }
+    }
+    s.assert(&solution);
+
+    match s.check(&[]) {
+        SatResult::Sat => {
+            let model = s.get_model().unwrap();
+            let detectors: BTreeMap<(i32, i32), Rational64> = verts.iter().map(|(p, v)| (*p, model.eval(v, false).unwrap().as_real().unwrap())).map(|(p, v)| (p, Rational64::new(v.0, v.1))).collect();
+            let avg_sh: Rational64 = model.eval(&avg_sh, false).unwrap().as_real().map(|v| Rational64::new(v.0, v.1)).unwrap();
+            Some((detectors, avg_sh))
+        }
+        SatResult::Unsat => None,
+        SatResult::Unknown => unreachable!(),
+    }
+}
+
 fn print_result(shape: &BTreeSet<(i32, i32)>, res: &Option<(BTreeMap<(i32, i32), Rational64>, (i32, i32), (i32, i32), usize)>, mode: Bound) {
     match res {
         Some((detectors, b1, b2, tidx)) => {
@@ -1060,12 +1152,23 @@ impl fmt::Display for Graph {
 /// Compute various minimum values for general detection systems.
 #[derive(Parser)]
 enum Mode {
+    /// Maximize the average share within a known shape on an infinite grid.
+    Share {
+        /// The shape expression to operate on.
+        /// This supports the syntax r<rows>x<cols> for rectangles and d<radius> for diamonds.
+        /// The `& | ^ -` operators can be used to perform masking.
+        shape: String,
+        /// The graph parameter to check; e.g., old, ic, red:old, red:ic, etc.
+        param: Param,
+        /// The type of infinite grid; e.g., k, sq, tri, etc.
+        grid: Grid,
+    },
     /// Minimum value for a rectangular tiling on an infinite grid.
-    Rect {
-        /// Number of rows in the rectangular tile.
-        rows: NonZeroUsize,
-        /// Number of columns in the rectangular tile.
-        cols: NonZeroUsize,
+    Tile {
+        /// The shape expression to operate on.
+        /// This supports the syntax r<rows>x<cols> for rectangles and d<radius> for diamonds.
+        /// The `& | ^ -` operators can be used to perform masking.
+        shape: String,
         /// The graph parameter to check; e.g., old, ic, red:old, red:ic, etc.
         param: Param,
         /// The type of infinite grid; e.g., k, sq, tri, etc.
@@ -1076,10 +1179,10 @@ enum Mode {
     },
     /// Minimum value for an unknown tiling on an infinite grid.
     Entropy {
-        /// Number of rows in the bounding rectangle.
-        rows: NonZeroUsize,
-        /// Number of columns in the bounding rectangle.
-        cols: NonZeroUsize,
+        /// The shape expression to operate on.
+        /// This supports the syntax r<rows>x<cols> for rectangles and d<radius> for diamonds.
+        /// The `& | ^ -` operators can be used to perform masking.
+        shape: String,
         /// The size of the enclosed tile whose shape is unknown.
         size: NonZeroUsize,
         ///Tje graph parameter to check; e.g., old, ic, red:old, red:ic, etc.
@@ -1095,7 +1198,7 @@ enum Mode {
         threads: NonZeroUsize,
     },
     /// Minimum value for a finite graph.
-    Finite {
+    Graph {
         /// The graph expression to operate on.
         /// This supports the syntax Pn and Cn for paths and cycles on n vertices.
         /// The * operator denotes the cartesian product of graphs, while ** denotes the king cartesian product.
@@ -1125,21 +1228,37 @@ enum Mode {
 
 fn main() {
     match Mode::parse() {
-        Mode::Rect { rows, cols, grid, param, lower } => {
-            let shape = rect(rows.get(), cols.get());
+        Mode::Share { shape, param, grid } => {
+            let shape = grammar::ShapeExprParser::new().parse(&shape).unwrap().generate();
+            println!("averaging boundary:");
+            print_shape(&shape, &Default::default());
+            println!();
+            match test_share(&shape, &grid, &param) {
+                Some((detectors, avg_sh)) => {
+                    println!("found maximum:");
+                    print_shape(&detectors.keys().copied().collect(), &detectors);
+                    println!("\naverage share: {avg_sh} ({})", *avg_sh.numer() as f64 / *avg_sh.denom() as f64);
+                    println!("lower bound:   {} ({})", avg_sh.recip(), *avg_sh.denom() as f64 / *avg_sh.numer() as f64);
+                }
+                None => println!("no solution"),
+            }
+        }
+        Mode::Tile { shape, grid, param, lower } => {
+            let shape = grammar::ShapeExprParser::new().parse(&shape).unwrap().generate();
             let mode = if lower { Bound::Lower } else { Bound::Upper };
+
             println!("checking {} {}\n", param.get_name(), grid.name);
             print_result(&shape, &test_tiling(&shape, &grid, &param, mode, true), mode)
         }
-        Mode::Entropy { rows, cols, size, grid, param, threads, lower } => {
+        Mode::Entropy { shape, size, grid, param, threads, lower } => {
+            let shape = grammar::ShapeExprParser::new().parse(&shape).unwrap().generate();
             let mode = if lower { Bound::Lower } else { Bound::Upper };
 
+            println!("entropy boundary (size {}):", shape.len());
+            print_shape(&shape, &Default::default());
+
             let best_total = Arc::new(Mutex::new(None));
-            let shapes = Arc::new(Mutex::new(
-                (0..rows.get() as i32).cartesian_product(0..cols.get() as i32)
-                .combinations(size.get())
-                .map(|x| x.into_iter().collect::<BTreeSet<_>>())
-                .fuse()));
+            let shapes = Arc::new(Mutex::new(shape.into_iter().combinations(size.get()).map(|x| x.into_iter().collect::<BTreeSet<_>>()).fuse()));
             let shapes_total = Arc::new(AtomicUsize::new(0));
 
             let threads = (0..threads.get()).map(|_| {
@@ -1151,6 +1270,7 @@ fn main() {
                         Some(x) => x,
                         None => break,
                     };
+                    let shape = normalize(&shape);
                     if !grid.is_canonical(&shape) { continue }
                     shapes_total.fetch_add(1, MemOrder::Relaxed);
                     if let Some(res) = test_tiling(&shape, &grid, &param, mode, false) {
@@ -1169,7 +1289,7 @@ fn main() {
 
             println!("\ntested {} geometries", shapes_total.load(MemOrder::Relaxed));
         }
-        Mode::Finite { graph, param, all, include_iso, include_suboptimal, constraint } => {
+        Mode::Graph { graph, param, all, include_iso, include_suboptimal, constraint } => {
             let graph = Graph::build(&grammar::GraphExprParser::new().parse(&graph).unwrap()).unwrap();
             let constraint = grammar::BoolExprParser::new().parse(&constraint).unwrap();
 
