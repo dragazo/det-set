@@ -70,7 +70,9 @@ pub GraphExpr: GraphExpr = {
     #[precedence(level = "1")]
     #[assoc(side = "left")]
     <left:GraphExpr> "*" <right:GraphExpr> => GraphExpr::CartesianProduct { left: Box::new(left), right: Box::new(right) },
+    <src:GraphExpr> "^" <power:r"[0-9]+"> => GraphExpr::CartesianPower { src: Box::new(src), power: power.parse().unwrap() },
     <left:GraphExpr> "**" <right:GraphExpr> => GraphExpr::KingCartesianProduct { left: Box::new(left), right: Box::new(right) },
+    <src:GraphExpr> "^^" <power:r"[0-9]+"> => GraphExpr::KingCartesianPower { src: Box::new(src), power: power.parse().unwrap() },
 };
 GraphTerm: GraphExpr = {
     r"[pP][0-9]+" => GraphExpr::Path { size: <>[1..].parse().unwrap() },

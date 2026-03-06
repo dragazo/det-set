@@ -63,7 +63,9 @@ enum GraphExpr {
     Complete { size: usize },
     File { path: String },
     CartesianProduct { left: Box<GraphExpr>, right: Box<GraphExpr> },
+    CartesianPower { src: Box<GraphExpr>, power: NonZeroUsize },
     KingCartesianProduct { left: Box<GraphExpr>, right: Box<GraphExpr> },
+    KingCartesianPower { src: Box<GraphExpr>, power: NonZeroUsize },
 }
 #[derive(Debug)]
 enum ShapeExpr {
@@ -1104,7 +1106,9 @@ impl Graph {
             GraphExpr::Complete { size } => Ok(Graph::by_adj(&(0..*size).collect::<Vec<_>>(), |&x| format!("{x}"), |_, _| true)),
             GraphExpr::File { path } => Graph::read(&mut BufReader::new(File::open(path).unwrap())),
             GraphExpr::CartesianProduct { left, right } => Ok(Graph::build(left)?.cartesian_product(&Graph::build(right)?)),
+            GraphExpr::CartesianPower { src, power } => Graph::build(src).map(|g| (1..power.get()).fold(g.clone(), |x, _| x.cartesian_product(&g))),
             GraphExpr::KingCartesianProduct { left, right } => Ok(Graph::build(left)?.king_cartesian_product(&Graph::build(right)?)),
+            GraphExpr::KingCartesianPower { src, power } => Graph::build(src).map(|g| (1..power.get()).fold(g.clone(), |x, _| x.king_cartesian_product(&g))),
         }
     }
     fn by_adj<T, N, A>(points: &[T], namer: N, is_adj: A) -> Self where N: Fn(&T) -> String, A: Fn(&T, &T) -> bool {
