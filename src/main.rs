@@ -10,6 +10,7 @@ use std::mem;
 use std::thread;
 use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicUsize, Ordering as MemOrder};
+use std::process::{Command, Stdio, ChildStdout};
 
 use itertools::Itertools;
 use clap::Parser;
@@ -18,6 +19,8 @@ use z3::{Context, Solver, Optimize, SatResult, Model};
 use z3::ast::{Bool, Real, Int, Ast};
 
 use num_rational::Rational64;
+
+use graph6_rs::GraphConversion;
 
 use lalrpop_util::lalrpop_mod;
 
@@ -44,6 +47,7 @@ enum NumericExpr {
 
     DetectorValue { vertex: String },
     DetectorValueSum,
+    DetectorValueAvg,
 
     DominationNumber { vertex: String },
     Share { vertex: String },
@@ -131,6 +135,7 @@ impl fmt::Display for NumericExpr {
             NumericExpr::Constant { value } => write!(f, "{value}"),
 
             NumericExpr::DetectorValueSum => write!(f, "sum(S)"),
+            NumericExpr::DetectorValueAvg => write!(f, "avg(S)"),
 
             NumericExpr::DetectorValue { vertex } => write!(f, "S({vertex})"),
             NumericExpr::DominationNumber { vertex } => write!(f, "dom({vertex})"),
@@ -506,8 +511,11 @@ fn build_numeric_expr<'ctx, P: Point>(context: &(&'ctx Context, &BTreeMap<&str, 
     let dom = |p: P| sum(context.0, context.4.dom_region(p, context.3).iter().copied().map(|x| context.2[&x].clone()));
     match expr {
         NumericExpr::Constant { value } => Real::from_real(context.0, *value.numer() as i32, *value.denom() as i32),
+
         NumericExpr::DetectorValue { vertex } => context.2[&context.1[vertex.as_str()]].clone(),
         NumericExpr::DetectorValueSum => sum(context.0, context.2.values().cloned()),
+        NumericExpr::DetectorValueAvg => sum(context.0, context.2.values().cloned()) / Real::from_real(context.0, context.2.len() as i32, 1),
+
         NumericExpr::DominationNumber { vertex } => dom(context.1[vertex.as_str()]),
         NumericExpr::Share { vertex } => {
             let p: P = context.1[vertex.as_str()];
@@ -538,6 +546,43 @@ fn build_bool_expr<'ctx, P: Point>(context: &(&'ctx Context, &BTreeMap<&str, P>,
         BoolExpr::And { left, right } => build_bool_expr(context, left) & build_bool_expr(context, right),
         BoolExpr::Xor { left, right } => build_bool_expr(context, left) ^ build_bool_expr(context, right),
         BoolExpr::Or { left, right } => build_bool_expr(context, left) | build_bool_expr(context, right),
+    }
+}
+
+fn check_numeric_expr(context: &BTreeMap<usize, Rational64>, expr: &NumericExpr) -> Rational64 {
+    match expr {
+        NumericExpr::Constant { value } => *value,
+
+        NumericExpr::DetectorValue { vertex } => unimplemented!(),
+        NumericExpr::DetectorValueSum => context.values().sum(),
+        NumericExpr::DetectorValueAvg => context.values().sum::<Rational64>() / context.len() as i64,
+
+        NumericExpr::DominationNumber { vertex } => unimplemented!(),
+        NumericExpr::Share { vertex } => unimplemented!(),
+
+        NumericExpr::Neg { value } => -check_numeric_expr(context, value),
+
+        NumericExpr::Mul { left, right } => check_numeric_expr(context, left) * check_numeric_expr(context, right),
+        NumericExpr::Div { left, right } => check_numeric_expr(context, left) / check_numeric_expr(context, right),
+
+        NumericExpr::Add { left, right } => check_numeric_expr(context, left) + check_numeric_expr(context, right),
+        NumericExpr::Sub { left, right } => check_numeric_expr(context, left) - check_numeric_expr(context, right),
+    }
+}
+fn check_bool_expr(context: &BTreeMap<usize, Rational64>, expr: &BoolExpr) -> bool {
+    match expr {
+        BoolExpr::Constant { value } => *value,
+
+        BoolExpr::Not { value } => !check_bool_expr(context, value),
+
+        BoolExpr::Less { left, right } => check_numeric_expr(context, left) < check_numeric_expr(context, right),
+        BoolExpr::LessEq { left, right } => check_numeric_expr(context, left) <= check_numeric_expr(context, right),
+        BoolExpr::Eq { left, right } => check_numeric_expr(context, left) == check_numeric_expr(context, right),
+        BoolExpr::Neq { left, right } => check_numeric_expr(context, left) != check_numeric_expr(context, right),
+
+        BoolExpr::And { left, right } => check_bool_expr(context, left) && check_bool_expr(context, right),
+        BoolExpr::Xor { left, right } => check_bool_expr(context, left) ^ check_bool_expr(context, right),
+        BoolExpr::Or { left, right } => check_bool_expr(context, left) || check_bool_expr(context, right),
     }
 }
 
@@ -1160,6 +1205,93 @@ impl fmt::Display for Graph {
     }
 }
 
+struct G6(String);
+impl G6 {
+    fn parse(&self) -> Graph {
+        let net = graph6_rs::Graph::from_g6(&self.0).unwrap().to_net();
+        let mut net = net.lines();
+
+        let mut g = Graph { verts: vec![] };
+        let mut tokens = vec![];
+        let mut id_to_index = BTreeMap::new();
+
+        assert!(net.next().unwrap().starts_with("*Vertices"));
+        for line in &mut net {
+            if line.starts_with("*Arcs") { break }
+
+            tokens.clear();
+            tokens.extend(line.split_whitespace());
+            assert_eq!(tokens.len(), 2);
+            assert!(tokens[1].starts_with('"') && tokens[1].ends_with('"'));
+
+            assert!(id_to_index.insert(tokens[0], g.verts.len()).is_none());
+            g.verts.push((tokens[0].to_owned(), Default::default()));
+        }
+        for line in &mut net {
+            tokens.clear();
+            tokens.extend(line.split_whitespace());
+            assert_eq!(tokens.len(), 2);
+
+            let (u, v) = (id_to_index[tokens[0]], id_to_index[tokens[1]]);
+            assert_ne!(u, v);
+            g.verts[u].1.insert(v);
+            g.verts[v].1.insert(u);
+        }
+
+        g
+    }
+}
+
+struct GengSettings {
+    nauty_path: String,
+
+    vertices: NonZeroUsize,
+    min_edges: Option<usize>,
+    max_edges: Option<usize>,
+    min_degree: Option<usize>,
+    max_degree: Option<usize>,
+
+    tree: bool,
+}
+struct GengIter {
+    reader: BufReader<ChildStdout>,
+}
+impl GengIter {
+    fn new(settings: GengSettings) -> Self {
+        let mut command = Command::new(&format!("{}/geng", settings.nauty_path));
+        command.arg(settings.vertices.to_string());
+        command.arg("-c");
+        match settings.tree {
+            true => {
+                let m = settings.vertices.get() - 1;
+                if settings.min_edges.map(|x| x != m).unwrap_or(false) || settings.max_edges.map(|x| x != m).unwrap_or(false) {
+                    panic!("tree and min/max edges incompatible");
+                }
+                command.arg(format!("{m}:{m}"));
+            }
+            false => { command.arg(format!("{}:{}", settings.min_edges.unwrap_or(0), settings.max_edges.unwrap_or(i32::MAX as _))); }
+        }
+        command.arg(format!("-d{}", settings.min_degree.unwrap_or(0)));
+        command.arg(format!("-D{}", settings.max_degree.unwrap_or(i32::MAX as _)));
+        command.stdout(Stdio::piped());
+        command.stderr(Stdio::null());
+        let mut proc = command.spawn().unwrap();
+
+        GengIter {
+            reader: BufReader::new(proc.stdout.take().unwrap()),
+        }
+    }
+}
+impl Iterator for GengIter {
+    type Item = G6;
+    fn next(&mut self) -> Option<Self::Item> {
+        let mut res = String::new();
+        let n = self.reader.read_line(&mut res).unwrap();
+        res.truncate(res.trim_end().len());
+        if n > 0 { Some(G6(res)) } else { None }
+    }
+}
+
 /// Compute various minimum values for general detection systems.
 #[derive(Parser)]
 enum Mode {
@@ -1223,9 +1355,45 @@ enum Mode {
         #[clap(long, default_value_t = String::from("true"))]
         constraint: String,
     },
+    /// Generate non-isomorphic graphs and explore values on a certain parameter.
+    Explore {
+        /// The graph parameter to check; e.g., old, ic, red:old, red:ic, etc.
+        param: Param,
+        /// Number of vertices in the graph
+        vertices: NonZeroUsize,
+        /// Minimum number of edges
+        #[clap(long, short = 'm')]
+        min_edges: Option<usize>,
+        /// Maximum number of edges
+        #[clap(long, short = 'M')]
+        max_edges: Option<usize>,
+        /// Minimum degree
+        #[clap(long, short = 'd')]
+        min_degree: Option<usize>,
+        /// Maximum degree
+        #[clap(long, short = 'D')]
+        max_degree: Option<usize>,
+        /// Only generate trees
+        #[clap(long)]
+        tree: bool,
+        /// The number of threads to use for iterating geometries
+        #[clap(short, long, default_value_t = NonZeroUsize::new(num_cpus::get()).unwrap())]
+        threads: NonZeroUsize,
+        /// Extra constraint on output solutions
+        #[clap(long, default_value_t = String::from("true"))]
+        constraint: String,
+        /// Extra filter on output solutions
+        #[clap(long, default_value_t = String::from("true"))]
+        filter: String,
+    },
 }
 
 fn main() {
+    dotenv::dotenv().unwrap();
+    macro_rules! env {
+        ($k:literal) => { std::env::var($k).expect(concat!("missing environment variable: ", $k)) };
+    }
+
     match Mode::parse() {
         Mode::Share { shape, param, grid, entropy, threads } => {
             let shape = grammar::ShapeExprParser::new().parse(&shape).unwrap().generate(&grid);
@@ -1239,36 +1407,31 @@ fn main() {
             let shapes_total = Arc::new(AtomicUsize::new(0));
             let explored_shapes = Arc::new(Mutex::new(BTreeSet::new()));
 
-            let threads = (0..threads.get()).map(|_| {
-                let current_best = current_best.clone();
-                let shapes = shapes.clone();
-                let shapes_total = shapes_total.clone();
-                let explored_shapes = explored_shapes.clone();
-                std::thread::spawn(move || loop {
-                    let shape = match shapes.lock().unwrap().next() {
-                        Some(x) => x,
-                        None => break,
-                    };
-                    let shape = normalize(&shape);
-                    if !grid.is_canonical(&shape) { continue }
-                    if !explored_shapes.lock().unwrap().insert(shape.clone()) { continue }
-                    shapes_total.fetch_add(1, MemOrder::Relaxed);
-                    if let Some(res) = test_share(&shape, &grid, &param) {
-                        let mut current_best = current_best.lock().unwrap();
-                        if current_best.as_ref().map(|x| res.1 > *x).unwrap_or(true) {
-                            println!("\nnew current max average share: {} -> bound {} ({})", res.1, res.1.recip(), *res.1.denom() as f64 / *res.1.numer() as f64);
-                            println!("averaging region:");
-                            print_shape(&shape, &Default::default());
-                            println!("solution:");
-                            print_shape(&res.0.keys().copied().collect(), &res.0);
-                            *current_best = Some(res.1);
+            std::thread::scope(|s| {
+                for _ in 0..threads.get() {
+                    s.spawn(|| loop {
+                        let shape = match shapes.lock().unwrap().next() {
+                            Some(x) => x,
+                            None => break,
+                        };
+                        let shape = normalize(&shape);
+                        if !grid.is_canonical(&shape) { continue }
+                        if !explored_shapes.lock().unwrap().insert(shape.clone()) { continue }
+                        shapes_total.fetch_add(1, MemOrder::Relaxed);
+                        if let Some(res) = test_share(&shape, &grid, &param) {
+                            let mut current_best = current_best.lock().unwrap();
+                            if current_best.as_ref().map(|x| res.1 > *x).unwrap_or(true) {
+                                println!("\nnew current max average share: {} -> bound {} ({})", res.1, res.1.recip(), *res.1.denom() as f64 / *res.1.numer() as f64);
+                                println!("averaging region:");
+                                print_shape(&shape, &Default::default());
+                                println!("solution:");
+                                print_shape(&res.0.keys().copied().collect(), &res.0);
+                                *current_best = Some(res.1);
+                            }
                         }
-                    }
-                })
-            }).collect::<Vec<_>>();
-            for thread in threads {
-                thread.join().unwrap();
-            }
+                    });
+                }
+            });
 
             println!("\ntested {} geometries", shapes_total.load(MemOrder::Relaxed));
         }
@@ -1280,38 +1443,33 @@ fn main() {
             println!("entropy boundary (size {}):", shape.len());
             print_shape(&shape, &Default::default());
 
-            let current_best: Arc<Mutex<Option<Rational64>>> = Arc::new(Mutex::new(None));
-            let shapes = Arc::new(Mutex::new(shape.into_iter().combinations(entropy).map(|x| x.into_iter().collect::<BTreeSet<_>>()).fuse()));
-            let shapes_total = Arc::new(AtomicUsize::new(0));
-            let explored_shapes = Arc::new(Mutex::new(BTreeSet::new()));
+            let current_best: Mutex<Option<Rational64>> = Mutex::new(None);
+            let shapes = Mutex::new(shape.into_iter().combinations(entropy).map(|x| x.into_iter().collect::<BTreeSet<_>>()).fuse());
+            let shapes_total = AtomicUsize::new(0);
+            let explored_shapes = Mutex::new(BTreeSet::new());
 
-            let threads = (0..threads.get()).map(|_| {
-                let current_best = current_best.clone();
-                let shapes = shapes.clone();
-                let shapes_total = shapes_total.clone();
-                let explored_shapes = explored_shapes.clone();
-                thread::spawn(move || loop {
-                    let shape = match shapes.lock().unwrap().next() {
-                        Some(x) => x,
-                        None => break,
-                    };
-                    let shape = normalize(&shape);
-                    if !grid.is_canonical(&shape) { continue }
-                    if !explored_shapes.lock().unwrap().insert(shape.clone()) { continue }
-                    shapes_total.fetch_add(1, MemOrder::Relaxed);
-                    if let Some(res) = test_tiling(&shape, &grid, &param, mode, false) {
-                        let total: Rational64 = res.0.values().sum();
-                        let mut current_best = current_best.lock().unwrap();
-                        if mode.optimize(&mut *current_best, total) {
-                            println!("\nnew current best:");
-                            print_result(&shape, &Some(res), mode);
+            std::thread::scope(|s| {
+                for _ in 0..threads.get() {
+                    s.spawn(|| loop {
+                        let shape = match shapes.lock().unwrap().next() {
+                            Some(x) => x,
+                            None => break,
+                        };
+                        let shape = normalize(&shape);
+                        if !grid.is_canonical(&shape) { continue }
+                        if !explored_shapes.lock().unwrap().insert(shape.clone()) { continue }
+                        shapes_total.fetch_add(1, MemOrder::Relaxed);
+                        if let Some(res) = test_tiling(&shape, &grid, &param, mode, false) {
+                            let total: Rational64 = res.0.values().sum();
+                            let mut current_best = current_best.lock().unwrap();
+                            if mode.optimize(&mut *current_best, total) {
+                                println!("\nnew current best:");
+                                print_result(&shape, &Some(res), mode);
+                            }
                         }
-                    }
-                })
-            }).collect::<Vec<_>>();
-            for thread in threads {
-                thread.join().unwrap();
-            }
+                    });
+                }
+            });
 
             println!("\ntested {} geometries", shapes_total.load(MemOrder::Relaxed));
         }
@@ -1321,6 +1479,33 @@ fn main() {
 
             println!("checking {}\nG = {}\nn = {}\ne = {}\n\nsubject to constraint: {constraint}\n", param.get_name(), graph, graph.verts.len(), graph.verts.iter().map(|x| x.1.len()).sum::<usize>() / 2);
             test_graph(&graph, &param, all, true, !include_iso, !include_suboptimal, &constraint);
+        }
+        Mode::Explore { param, vertices, min_edges, max_edges, min_degree, max_degree, tree, threads, constraint, filter } => {
+            let graphs = Mutex::new(GengIter::new(GengSettings { nauty_path: env!("NAUTY_PATH"), vertices, min_edges, max_edges, min_degree, max_degree, tree }).fuse());
+            let graph_count = AtomicUsize::new(0);
+            let constraint = grammar::BoolExprParser::new().parse(&constraint).unwrap();
+            let filter = grammar::BoolExprParser::new().parse(&filter).unwrap();
+
+            thread::scope(|s| {
+                for _ in 0..threads.get() {
+                    s.spawn(|| loop {
+                        let graph = match graphs.lock().unwrap().next() {
+                            Some(x) => x,
+                            None => break,
+                        };
+                        graph_count.fetch_add(1, MemOrder::Relaxed);
+                        let graph = graph.parse();
+                        let solutions = test_graph(&graph, &param, false, false, true, true, &constraint);
+                        assert!(solutions.len() <= 1);
+                        let solution = if let Some(x) = solutions.into_iter().next() { x } else { continue };
+                        if !check_bool_expr(&solution, &filter) { continue }
+                        let s = solution.values().sum::<Rational64>();
+                        println!("{} ({}) :: {}", s, s / solution.len() as i64, graph);
+                    });
+                }
+            });
+
+            println!("explored {} non-isomorphic graphs", graph_count.load(MemOrder::Relaxed));
         }
     }
 }

@@ -56,10 +56,12 @@ NumericExpr: NumericExpr = {
 };
 NumericTerm: NumericExpr = {
     r"[0-9]+" => NumericExpr::Constant { value: Rational64::new(<>.parse().unwrap(), 1) },
+    r"[0-9]+\.[0-9]+" => { let p = <>.find('.').unwrap(); NumericExpr::Constant { value: Rational64::new(<>[..p].parse().unwrap(), 1) + Rational64::new(<>[p + 1..].parse().unwrap(), 10i64.checked_pow((<>.len() - (p + 1)) as u32).unwrap()) } },
     r"S\([^)]+\)" => NumericExpr::DetectorValue { vertex: <>[2..<>.len() - 1].to_owned() },
     r"dom\([^)]+\)" => NumericExpr::DominationNumber { vertex: <>[4..<>.len() - 1].to_owned() },
     r"sh\([^)]+\)" => NumericExpr::Share { vertex: <>[3..<>.len() - 1].to_owned() },
     "sum(S)" => NumericExpr::DetectorValueSum,
+    "avg(S)" => NumericExpr::DetectorValueAvg,
     "(" <NumericExpr> ")" => <>,
 };
 

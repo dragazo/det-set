@@ -14,9 +14,12 @@
     ],
     "cSpell.words": [
         "cpus",
+        "dotenv",
+        "Geng",
         "lalrpop",
         "mult",
         "mults",
+        "nauty",
         "numer",
         "petgraph",
         "recip",
