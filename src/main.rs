@@ -8,7 +8,7 @@ use std::fs::File;
 use std::iter;
 use std::mem;
 use std::thread;
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering as MemOrder};
 use std::process::{Command, Stdio, ChildStdout};
 
@@ -1389,7 +1389,7 @@ enum Mode {
 }
 
 fn main() {
-    dotenv::dotenv().unwrap();
+    dotenv::dotenv().ok();
     macro_rules! env {
         ($k:literal) => { std::env::var($k).expect(concat!("missing environment variable: ", $k)) };
     }
@@ -1402,10 +1402,10 @@ fn main() {
             println!("entropy boundary (size {}):", shape.len());
             print_shape(&shape, &Default::default());
 
-            let current_best: Arc<Mutex<Option<Rational64>>> = Arc::new(Mutex::new(None));
-            let shapes = Arc::new(Mutex::new(shape.into_iter().combinations(entropy).map(|x| x.into_iter().collect::<BTreeSet<_>>()).fuse()));
-            let shapes_total = Arc::new(AtomicUsize::new(0));
-            let explored_shapes = Arc::new(Mutex::new(BTreeSet::new()));
+            let current_best: Mutex<Option<Rational64>> = Mutex::new(None);
+            let shapes = Mutex::new(shape.into_iter().combinations(entropy).map(|x| x.into_iter().collect::<BTreeSet<_>>()).fuse());
+            let shapes_total = AtomicUsize::new(0);
+            let explored_shapes = Mutex::new(BTreeSet::new());
 
             std::thread::scope(|s| {
                 for _ in 0..threads.get() {
