@@ -1110,7 +1110,7 @@ enum GraphParseError {
 }
 impl From<io::Error> for GraphParseError { fn from(error: io::Error) -> Self { Self::IO { error } } }
 
-#[derive(Default, Debug, Clone)]
+#[derive(Default, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct Graph {
     verts: Vec<(String, BTreeSet<usize>)>,
 }
@@ -1243,24 +1243,32 @@ impl G6 {
 }
 
 struct GengSettings {
-    nauty_path: String,
-
     vertices: NonZeroUsize,
     min_edges: Option<usize>,
     max_edges: Option<usize>,
     min_degree: Option<usize>,
     max_degree: Option<usize>,
 
+    biconnected: bool,
     tree: bool,
+    chordal: bool,
+    split: bool,
+    perfect: bool,
+    bipartite: bool,
+
+    c3_free: bool,
+    c4_free: bool,
+    c5_free: bool,
+    k4_free: bool,
+    claw_free: bool,
 }
 struct GengIter {
     reader: BufReader<ChildStdout>,
 }
 impl GengIter {
     fn new(settings: GengSettings) -> Self {
-        let mut command = Command::new(&format!("{}/geng", settings.nauty_path));
+        let mut command = Command::new("geng");
         command.arg(settings.vertices.to_string());
-        command.arg("-c");
         match settings.tree {
             true => {
                 let m = settings.vertices.get() - 1;
@@ -1273,6 +1281,16 @@ impl GengIter {
         }
         command.arg(format!("-d{}", settings.min_degree.unwrap_or(0)));
         command.arg(format!("-D{}", settings.max_degree.unwrap_or(i32::MAX as _)));
+        command.arg(if settings.biconnected { "-C" } else { "-c" });
+        if settings.c3_free { command.arg("-t"); }
+        if settings.c4_free { command.arg("-f"); }
+        if settings.c5_free { command.arg("-p"); }
+        if settings.k4_free { command.arg("-k"); }
+        if settings.chordal { command.arg("-T"); }
+        if settings.split { command.arg("-S"); }
+        if settings.perfect { command.arg("-P"); }
+        if settings.claw_free { command.arg("-F"); }
+        if settings.bipartite { command.arg("-b"); }
         command.stdout(Stdio::piped());
         command.stderr(Stdio::null());
         let mut proc = command.spawn().unwrap();
@@ -1373,9 +1391,39 @@ enum Mode {
         /// Maximum degree
         #[clap(long, short = 'D')]
         max_degree: Option<usize>,
+        /// Only generate biconnected graphs (default is connected)
+        #[clap(long)]
+        biconnected: bool,
         /// Only generate trees
         #[clap(long)]
         tree: bool,
+        /// Only generage chordal graphs
+        #[clap(long)]
+        chordal: bool,
+        /// Only generate split graphs
+        #[clap(long)]
+        split: bool,
+        /// Only generate perfect graphs
+        #[clap(long)]
+        perfect: bool,
+        /// Only generate bipartite graphs
+        #[clap(long)]
+        bipartite: bool,
+        /// Only generate C3-free graphs
+        #[clap(long)]
+        c3_free: bool,
+        /// Only generate C4-free graphs
+        #[clap(long)]
+        c4_free: bool,
+        /// Only generate C5-free graphs
+        #[clap(long)]
+        c5_free: bool,
+        /// Only generate K4-gree graphs
+        #[clap(long)]
+        k4_free: bool,
+        /// Only generate claw-free graphs
+        #[clap(long)]
+        claw_free: bool,
         /// The number of threads to use for iterating geometries
         #[clap(short, long, default_value_t = NonZeroUsize::new(num_cpus::get()).unwrap())]
         threads: NonZeroUsize,
@@ -1385,15 +1433,16 @@ enum Mode {
         /// Extra filter on output solutions
         #[clap(long, default_value_t = String::from("true"))]
         filter: String,
+        /// Output graphs in sorted order of parameter value
+        #[clap(long)]
+        sorted: bool,
+        /// Output graphs in reverse order (only with --sorted)
+        #[clap(long)]
+        reverse: bool,
     },
 }
 
 fn main() {
-    dotenv::dotenv().ok();
-    macro_rules! env {
-        ($k:literal) => { std::env::var($k).expect(concat!("missing environment variable: ", $k)) };
-    }
-
     match Mode::parse() {
         Mode::Share { shape, param, grid, entropy, threads } => {
             let shape = grammar::ShapeExprParser::new().parse(&shape).unwrap().generate(&grid);
@@ -1480,11 +1529,23 @@ fn main() {
             println!("checking {}\nG = {}\nn = {}\ne = {}\n\nsubject to constraint: {constraint}\n", param.get_name(), graph, graph.verts.len(), graph.verts.iter().map(|x| x.1.len()).sum::<usize>() / 2);
             test_graph(&graph, &param, all, true, !include_iso, !include_suboptimal, &constraint);
         }
-        Mode::Explore { param, vertices, min_edges, max_edges, min_degree, max_degree, tree, threads, constraint, filter } => {
-            let graphs = Mutex::new(GengIter::new(GengSettings { nauty_path: env!("NAUTY_PATH"), vertices, min_edges, max_edges, min_degree, max_degree, tree }).fuse());
-            let graph_count = AtomicUsize::new(0);
+        Mode::Explore { param, vertices, min_edges, max_edges, min_degree, max_degree, biconnected, tree, threads, sorted, reverse, constraint, filter, chordal, split, perfect, bipartite, c3_free, c4_free, c5_free, k4_free, claw_free } => {
+            let graphs = Mutex::new(GengIter::new(GengSettings { vertices, min_edges, max_edges, min_degree, max_degree, biconnected, tree, chordal, split, perfect, bipartite, c3_free, c4_free, c5_free, k4_free, claw_free }).fuse());
             let constraint = grammar::BoolExprParser::new().parse(&constraint).unwrap();
             let filter = grammar::BoolExprParser::new().parse(&filter).unwrap();
+            let graph_count = AtomicUsize::new(0);
+            let condition_count = AtomicUsize::new(0);
+            let filter_count = AtomicUsize::new(0);
+
+            let outputs: Mutex<Vec<(Graph, BTreeMap<usize, Rational64>)>> = Mutex::new(vec![]);
+            fn print_output(graph: &Graph, solution: &BTreeMap<usize, Rational64>) {
+                let s = solution.values().sum::<Rational64>();
+                println!("{} ({}) :: {}", s, s / solution.len() as i64, graph);
+            }
+            let output: &(dyn Sync + Fn (Graph, BTreeMap<usize, Rational64>)) = match sorted {
+                true => &|graph, solution| outputs.lock().unwrap().push((graph, solution)),
+                false => &|graph, solution| print_output(&graph, &solution),
+            };
 
             thread::scope(|s| {
                 for _ in 0..threads.get() {
@@ -1498,14 +1559,24 @@ fn main() {
                         let solutions = test_graph(&graph, &param, false, false, true, true, &constraint);
                         assert!(solutions.len() <= 1);
                         let solution = if let Some(x) = solutions.into_iter().next() { x } else { continue };
+                        condition_count.fetch_add(1, MemOrder::Relaxed);
                         if !check_bool_expr(&solution, &filter) { continue }
-                        let s = solution.values().sum::<Rational64>();
-                        println!("{} ({}) :: {}", s, s / solution.len() as i64, graph);
+                        filter_count.fetch_add(1, MemOrder::Relaxed);
+                        output(graph, solution);
                     });
                 }
             });
 
-            println!("explored {} non-isomorphic graphs", graph_count.load(MemOrder::Relaxed));
+            let mut outputs = outputs.lock().unwrap();
+            outputs.sort_by(|a, b| a.0.cmp(&b.0));
+            outputs.sort_by_key(|(_, solution)| solution.values().sum::<Rational64>());
+            if reverse { outputs.reverse() }
+            for (solution, graph) in outputs.iter() {
+                print_output(solution, graph);
+            }
+
+            println!("explored {} non-isomorphic graphs, {} passed condition, {} passed filter",
+                graph_count.load(MemOrder::Relaxed), condition_count.load(MemOrder::Relaxed), filter_count.load(MemOrder::Relaxed));
         }
     }
 }
