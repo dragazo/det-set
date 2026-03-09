@@ -904,7 +904,7 @@ fn test_graph(graph: &Graph, param: &Param, exhaustive: bool, log: bool, omit_is
     if log {
         match &minimum_value {
             Some(value) => match (exhaustive, omit_isomorphic) {
-                (false, _) => println!("\nfound a {}solution of size {}", if optimize { "minimum " } else { "" }, Verbose(value)),
+                (false, _) => println!("\nfound a {}solution of size {} ({})", if optimize { "minimum " } else { "" }, Verbose(value), Verbose(&(value / graph.verts.len() as i64))),
                 (true, true) => println!("\nexhausted all {} non-isomorphic {}solutions of size {}", solutions.len(), if optimize { "minimum " } else { "" }, Verbose(value)),
                 (true, false) => {
                     println!("\nexhausted all {} {}solutions of size {}\n", solutions.len(), if optimize { "minimum " } else { "" }, Verbose(value));
