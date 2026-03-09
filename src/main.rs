@@ -1567,9 +1567,11 @@ fn main() {
                 }
             });
 
+            fn key<'a>(graph: &'a Graph, solution: &BTreeMap<usize, Rational64>) -> (Rational64, usize, &'a Graph) {
+                (solution.values().sum::<Rational64>(), graph.verts.iter().map(|x| x.1.len()).sum::<usize>(), graph)
+            }
             let mut outputs = outputs.lock().unwrap();
-            outputs.sort_by(|a, b| a.0.cmp(&b.0));
-            outputs.sort_by_key(|(_, solution)| solution.values().sum::<Rational64>());
+            outputs.sort_by(|a, b| key(&a.0, &a.1).cmp(&key(&b.0, &b.1)));
             if reverse { outputs.reverse() }
             for (solution, graph) in outputs.iter() {
                 print_output(solution, graph);
