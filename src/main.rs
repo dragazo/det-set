@@ -1435,7 +1435,7 @@ enum Mode {
         filter: String,
         /// Output graphs in sorted order of parameter value
         #[clap(long)]
-        sorted: bool,
+        sort: bool,
         /// Output graphs in reverse order (only with --sorted)
         #[clap(long)]
         reverse: bool,
@@ -1529,7 +1529,7 @@ fn main() {
             println!("checking {}\nG = {}\nn = {}\ne = {}\n\nsubject to constraint: {constraint}\n", param.get_name(), graph, graph.verts.len(), graph.verts.iter().map(|x| x.1.len()).sum::<usize>() / 2);
             test_graph(&graph, &param, all, true, !include_iso, !include_suboptimal, &constraint);
         }
-        Mode::Explore { param, vertices, min_edges, max_edges, min_degree, max_degree, biconnected, tree, threads, sorted, reverse, constraint, filter, chordal, split, perfect, bipartite, c3_free, c4_free, c5_free, k4_free, claw_free } => {
+        Mode::Explore { param, vertices, min_edges, max_edges, min_degree, max_degree, biconnected, tree, threads, sort, reverse, constraint, filter, chordal, split, perfect, bipartite, c3_free, c4_free, c5_free, k4_free, claw_free } => {
             let graphs = Mutex::new(GengIter::new(GengSettings { vertices, min_edges, max_edges, min_degree, max_degree, biconnected, tree, chordal, split, perfect, bipartite, c3_free, c4_free, c5_free, k4_free, claw_free }).fuse());
             let constraint = grammar::BoolExprParser::new().parse(&constraint).unwrap();
             let filter = grammar::BoolExprParser::new().parse(&filter).unwrap();
@@ -1542,7 +1542,7 @@ fn main() {
                 let s = solution.values().sum::<Rational64>();
                 println!("{} ({}) :: {}", s, s / solution.len() as i64, graph);
             }
-            let output: &(dyn Sync + Fn (Graph, BTreeMap<usize, Rational64>)) = match sorted {
+            let output: &(dyn Sync + Fn (Graph, BTreeMap<usize, Rational64>)) = match sort {
                 true => &|graph, solution| outputs.lock().unwrap().push((graph, solution)),
                 false => &|graph, solution| print_output(&graph, &solution),
             };
