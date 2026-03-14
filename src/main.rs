@@ -1,3 +1,6 @@
+#![allow(clippy::type_complexity)]
+#![allow(clippy::empty_line_after_outer_attr)]
+
 use std::collections::{BTreeSet, BTreeMap};
 use std::str::FromStr;
 use std::num::NonZeroUsize;
@@ -10,7 +13,7 @@ use std::mem;
 use std::thread;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering as MemOrder};
-use std::process::{Command, Stdio, ChildStdout};
+use std::process::{Child, ChildStdout, Command, Stdio};
 
 use itertools::Itertools;
 use clap::Parser;
@@ -273,7 +276,7 @@ impl<'a, 'b, P: Point> Shells<'a, 'b, P> {
         }
     }
 }
-impl<'a, 'b, 'c, P: Point> Iterator for Shells<'a, 'b, P> {
+impl<'a, 'b, P: Point> Iterator for Shells<'a, 'b, P> {
     type Item = BTreeSet<P>;
     fn next(&mut self) -> Option<Self::Item> {
         for p in mem::take(&mut self.frontier) {
@@ -521,7 +524,7 @@ fn build_numeric_expr<'ctx, P: Point>(context: &(&'ctx Context, &BTreeMap<&str, 
             let p: P = context.1[vertex.as_str()];
             let det_val: &Real = &context.2[&p];
             sum(context.0, context.4.dom_region(p, context.3).iter().copied().map(|pp| det_val / dom(pp)))
-        },
+        }
 
         NumericExpr::Neg { value } => -build_numeric_expr(context, value),
 
@@ -549,16 +552,21 @@ fn build_bool_expr<'ctx, P: Point>(context: &(&'ctx Context, &BTreeMap<&str, P>,
     }
 }
 
-fn check_numeric_expr(context: &BTreeMap<usize, Rational64>, expr: &NumericExpr) -> Rational64 {
+fn check_numeric_expr<P: Point>(context: &(&BTreeMap<&str, P>, &BTreeMap<P, Rational64>, &Adj<'_, P>, &Param), expr: &NumericExpr) -> Rational64 {
+    let dom = |p: P| context.3.dom_region(p, context.2).iter().copied().map(|x| context.1[&x]).sum::<Rational64>();
     match expr {
         NumericExpr::Constant { value } => *value,
 
-        NumericExpr::DetectorValue { vertex } => unimplemented!(),
-        NumericExpr::DetectorValueSum => context.values().sum(),
-        NumericExpr::DetectorValueAvg => context.values().sum::<Rational64>() / context.len() as i64,
+        NumericExpr::DetectorValue { vertex } => context.1[&context.0[vertex.as_str()]],
+        NumericExpr::DetectorValueSum => context.1.values().sum(),
+        NumericExpr::DetectorValueAvg => context.1.values().sum::<Rational64>() / context.1.len() as i64,
 
-        NumericExpr::DominationNumber { vertex } => unimplemented!(),
-        NumericExpr::Share { vertex } => unimplemented!(),
+        NumericExpr::DominationNumber { vertex } => dom(context.0[vertex.as_str()]),
+        NumericExpr::Share { vertex } => {
+            let p: P = context.0[vertex.as_str()];
+            let det_val: &Rational64 = &context.1[&p];
+            context.3.dom_region(p, context.2).iter().copied().map(|pp| det_val / dom(pp)).sum::<Rational64>()
+        }
 
         NumericExpr::Neg { value } => -check_numeric_expr(context, value),
 
@@ -569,7 +577,7 @@ fn check_numeric_expr(context: &BTreeMap<usize, Rational64>, expr: &NumericExpr)
         NumericExpr::Sub { left, right } => check_numeric_expr(context, left) - check_numeric_expr(context, right),
     }
 }
-fn check_bool_expr(context: &BTreeMap<usize, Rational64>, expr: &BoolExpr) -> bool {
+fn check_bool_expr<P: Point>(context: &(&BTreeMap<&str, P>, &BTreeMap<P, Rational64>, &Adj<'_, P>, &Param), expr: &BoolExpr) -> bool {
     match expr {
         BoolExpr::Constant { value } => *value,
 
@@ -594,7 +602,7 @@ struct Grid {
 }
 impl Grid {
     fn is_canonical(&self, shape: &BTreeSet<(i32, i32)>) -> bool {
-        std::iter::once(shape.clone()).chain(self.symmetries.iter().map(|s| s(&shape))).map(|s| normalize(&s)).collect::<BTreeSet<_>>().first().unwrap() == shape
+        std::iter::once(shape.clone()).chain(self.symmetries.iter().map(|s| s(shape))).map(|s| normalize(&s)).collect::<BTreeSet<_>>().first().unwrap() == shape
     }
 }
 impl FromStr for Grid {
@@ -750,11 +758,7 @@ enum Bound {
 impl Bound {
     fn optimize<T: Ord>(&self, best: &mut Option<T>, new: T) -> bool {
         let better = match best {
-            Some(best) => match (self, (*best).cmp(&new)) {
-                (Bound::Lower, Ordering::Less) => true,
-                (Bound::Upper, Ordering::Greater) => true,
-                _ => false,
-            }
+            Some(best) => matches!((self, (*best).cmp(&new)), (Bound::Lower, Ordering::Less) | (Bound::Upper, Ordering::Greater)),
             None => true,
         };
         if better {
@@ -876,7 +880,7 @@ fn test_graph(graph: &Graph, param: &Param, exhaustive: bool, log: bool, omit_is
 
                 let mut different_answer = Bool::from_bool(&context, false);
                 for (i, v) in verts.iter() {
-                    let value = detectors.get(&i).copied().unwrap();
+                    let value = detectors.get(i).copied().unwrap();
                     different_answer |= v._eq(&Real::from_real(&context, *value.numer() as i32, *value.denom() as i32)).not();
                 }
                 s.assert(&different_answer);
@@ -935,12 +939,12 @@ fn test_graph(graph: &Graph, param: &Param, exhaustive: bool, log: bool, omit_is
 fn test_tiling(shape: &BTreeSet<(i32, i32)>, grid: &Grid, param: &Param, mode: Bound, log: bool) -> Option<(BTreeMap<(i32, i32), Rational64>, (i32, i32), (i32, i32), usize)> {
     if log {
         println!("tile shape:");
-        print_shape(&shape, &Default::default());
+        print_shape(shape, &Default::default());
     }
 
-    let inflated = inflate(&shape, grid.adj, 2);
+    let inflated = inflate(shape, grid.adj, 2);
     let distances = Distances::within_shape(&inflated, grid.adj);
-    let tilings = match mode { Bound::Upper => get_tilings(&shape), Bound::Lower => vec![(shape.iter().map(|&p| (p, p)).collect(), (0, 0), (0, 0))] };
+    let tilings = match mode { Bound::Upper => get_tilings(shape), Bound::Lower => vec![(shape.iter().map(|&p| (p, p)).collect(), (0, 0), (0, 0))] };
 
     if log {
         print!("\ngenerated {} tilings...\ndetector sums:", tilings.len());
@@ -1025,7 +1029,7 @@ fn test_tiling(shape: &BTreeSet<(i32, i32)>, grid: &Grid, param: &Param, mode: B
 }
 
 fn test_share(shape: &BTreeSet<(i32, i32)>, grid: &Grid, param: &Param) -> Option<(BTreeMap<(i32, i32), Rational64>, Rational64)> {
-    let inflated = inflate(&shape, grid.adj, 2);
+    let inflated = inflate(shape, grid.adj, 2);
     let distances = Distances::within_shape(&inflated, grid.adj);
 
     let context = Context::new(&Default::default());
@@ -1090,7 +1094,7 @@ fn print_result(shape: &BTreeSet<(i32, i32)>, res: &Option<(BTreeMap<(i32, i32),
     match res {
         Some((detectors, b1, b2, tidx)) => {
             println!("found {}:", match mode { Bound::Upper => "minimum", Bound::Lower => "maximum" });
-            print_shape(&shape, detectors);
+            print_shape(shape, detectors);
             let total = detectors.iter().map(|x| x.1).sum::<Rational64>();
             let value = total / Rational64::new(shape.len() as i64, 1);
             println!("\n{}", Verbose(&value));
@@ -1264,6 +1268,7 @@ struct GengSettings {
 }
 struct GengIter {
     reader: BufReader<ChildStdout>,
+    proc: Child,
 }
 impl GengIter {
     fn new(settings: GengSettings) -> Self {
@@ -1297,7 +1302,13 @@ impl GengIter {
 
         GengIter {
             reader: BufReader::new(proc.stdout.take().unwrap()),
+            proc,
         }
+    }
+}
+impl Drop for GengIter {
+    fn drop(&mut self) {
+        self.proc.wait().ok();
     }
 }
 impl Iterator for GengIter {
@@ -1448,7 +1459,7 @@ fn main() {
             let shape = grammar::ShapeExprParser::new().parse(&shape).unwrap().generate(&grid);
             let entropy = entropy.map(|x| x.get()).unwrap_or(shape.len());
 
-            println!("entropy boundary (size {}):", shape.len());
+            println!("boundary (size {}) on {}", shape.len(), grid.name);
             print_shape(&shape, &Default::default());
 
             let current_best: Mutex<Option<Rational64>> = Mutex::new(None);
@@ -1489,7 +1500,7 @@ fn main() {
             let entropy = entropy.map(|x| x.get()).unwrap_or(shape.len());
             let mode = if lower { Bound::Lower } else { Bound::Upper };
 
-            println!("entropy boundary (size {}):", shape.len());
+            println!("boundary (size {}) on {}", shape.len(), grid.name);
             print_shape(&shape, &Default::default());
 
             let current_best: Mutex<Option<Rational64>> = Mutex::new(None);
@@ -1554,13 +1565,17 @@ fn main() {
                             Some(x) => x,
                             None => break,
                         };
-                        graph_count.fetch_add(1, MemOrder::Relaxed);
                         let graph = graph.parse();
+                        graph_count.fetch_add(1, MemOrder::Relaxed);
+
                         let solutions = test_graph(&graph, &param, false, false, true, true, &constraint);
                         assert!(solutions.len() <= 1);
                         let solution = if let Some(x) = solutions.into_iter().next() { x } else { continue };
                         condition_count.fetch_add(1, MemOrder::Relaxed);
-                        if !check_bool_expr(&solution, &filter) { continue }
+
+                        let names = &graph.verts.iter().enumerate().map(|x| (x.1.0.as_str(), x.0)).collect();
+                        let adj = |p: usize| graph.verts[p].1.clone();
+                        if !check_bool_expr(&(names, &solution, &adj, &param), &filter) { continue }
                         filter_count.fetch_add(1, MemOrder::Relaxed);
                         output(graph, solution);
                     });
